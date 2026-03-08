@@ -86,6 +86,7 @@ export type UserCredential = z.infer<typeof UserCredentialSchema>;
 export const UserRecordSchema = z.object({
   id: UserIdSchema,
   displayName: z.string().min(1),
+  avatarUrl: z.string().url().optional(),
   phoneNumber: PhoneNumberSchema,
   webauthnCredentials: z.array(UserCredentialSchema),
   identityPublicKey: z.string().min(10).optional(),
@@ -142,6 +143,15 @@ export const AuthVerifyLoginRequestSchema = z.object({
 export const IdentityKeyUpdateSchema = z.object({
   publicKey: z.string().min(10)
 });
+
+export const ProfileUpdateSchema = z
+  .object({
+    displayName: z.string().trim().min(1).max(60).optional(),
+    avatarUrl: z.string().trim().url().max(500).optional()
+  })
+  .refine((data) => data.displayName !== undefined || data.avatarUrl !== undefined, {
+    message: "At least one field is required"
+  });
 
 export const UploadMediaBodySchema = z.object({
   recipient: UserIdSchema,

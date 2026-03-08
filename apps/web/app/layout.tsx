@@ -11,7 +11,7 @@ const spaceGrotesk = Space_Grotesk({
 
 export const metadata: Metadata = {
   title: "LoveChat",
-  description: "Private 2-person encrypted messenger",
+  description: "Private encrypted messenger",
   manifest: "/manifest.webmanifest",
   icons: {
     icon: "/icons/icon.svg",

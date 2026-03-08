@@ -29,9 +29,16 @@ export interface AuthSession {
   wsToken: string;
   sessionToken?: string;
   selfIdentityPublicKey: string | null;
+  profile: {
+    id: UserId;
+    displayName: string;
+    avatarUrl: string | null;
+    phoneNumber: string;
+  };
   users: Array<{
     id: UserId;
     displayName: string;
+    avatarUrl: string | null;
     identityPublicKey: string | null;
   }>;
 }

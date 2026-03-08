@@ -16,8 +16,12 @@ Private messenger built as a monorepo:
 - Encrypted message + media persistence in MongoDB
 - Offline sync (`GET /messages?after=...` + `sync:request`/`sync:batch`)
 - Encrypted media upload/download/ack + retention cleanup
-- Voice notes (MediaRecorder -> encrypted media flow)
+- Voice notes + video notes (MediaRecorder -> encrypted media flow)
+- Inline media playback (audio/video/image) in chat without mandatory download
 - LiveKit Cloud call token endpoint + call signaling events
+- Improved call flow (ringing -> accept/decline -> join LiveKit room)
+- Native/web local notifications for incoming messages/calls (best-effort while app process is alive)
+- Account settings (`displayName`, `avatarUrl`) and per-chat nicknames
 - Capacitor Android project scaffold and sync scripts
 
 ## Quick start
@@ -95,6 +99,7 @@ If build fails with `JAVA_HOME is not set`, install JDK and set `JAVA_HOME`.
 - `POST /auth/logout`
 - `GET /users`
 - `POST /keys/identity`
+- `POST /profile`
 - `GET /messages?after=...`
 - `POST /upload-media`
 - `GET /media/:id`

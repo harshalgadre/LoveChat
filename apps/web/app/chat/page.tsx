@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { jsonRequest } from "../../lib/api";
-import { fetchSession, logout, updateIdentityPublicKey } from "../../lib/auth";
+import { fetchSession, logout, updateIdentityPublicKey, updateProfile } from "../../lib/auth";
 import { fileToBytes } from "../../lib/bytes";
 import { createLiveKitConnection, endLiveKitConnection, type ActiveCall } from "../../lib/calls";
 import {
@@ -18,7 +18,20 @@ import {
   ensureIdentityKey
 } from "../../lib/cryptoSession";
 import { ackMedia, downloadEncryptedMedia, uploadEncryptedMedia } from "../../lib/media";
-import { getLastServerId, getMessages, setLastServerId, setMessages } from "../../lib/storage";
+import {
+  cancelCallNotification,
+  initializeNotifications,
+  notifyIncomingCall,
+  notifyIncomingMessage
+} from "../../lib/notifications";
+import {
+  getLastServerId,
+  getMessages,
+  getNicknames,
+  setLastServerId,
+  setMessages,
+  setNickname
+} from "../../lib/storage";
 import type { AuthSession, MediaDescriptor, UiMessage } from "../../lib/types";
 import { ChatSocket, makeClientEvent } from "../../lib/wsClient";
 
@@ -28,11 +41,78 @@ type CallState = {
   callType: "audio" | "video";
 };
 
+type OutgoingCall = CallState & {
+  startedAt: number;
+};
+
 type IncomingCall = {
   from: UserId;
   roomName: string;
   callType: "audio" | "video";
 };
+
+type MediaPreview = {
+  objectUrl: string;
+  mimeType: string;
+};
+
+function formatTime(value: number): string {
+  return new Date(value).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
+function isInlineMedia(mimeType: string): boolean {
+  return mimeType.startsWith("image/") || mimeType.startsWith("audio/") || mimeType.startsWith("video/");
+}
+
+function createBlobUrl(bytes: Uint8Array, mimeType: string): string {
+  const mediaBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  const blob = new Blob([mediaBuffer], { type: mimeType });
+  return URL.createObjectURL(blob);
+}
+
+function triggerDownload(fileName: string, objectUrl: string) {
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = fileName;
+  link.click();
+}
+
+function Avatar({
+  name,
+  avatarUrl,
+  size = 34
+}: {
+  name: string;
+  avatarUrl?: string | null;
+  size?: number;
+}) {
+  const initial = name.trim().charAt(0).toUpperCase() || "?";
+  const style: Record<string, string | number> = {
+    width: `${size}px`,
+    height: `${size}px`,
+    borderRadius: "50%",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontWeight: 700,
+    color: "#f4fbff",
+    background: "linear-gradient(140deg, #1a4d5d, #0d2d3a)",
+    border: "1px solid rgba(159, 195, 209, 0.35)",
+    flexShrink: 0
+  };
+
+  if (avatarUrl) {
+    style.backgroundImage = `url(${avatarUrl})`;
+    style.backgroundSize = "cover";
+    style.backgroundPosition = "center";
+    style.color = "transparent";
+  }
+
+  return <span style={style}>{initial}</span>;
+}
 
 export default function ChatPage() {
   const router = useRouter();
@@ -45,18 +125,33 @@ export default function ChatPage() {
   const [socketStatus, setSocketStatus] = useState<"connecting" | "connected" | "disconnected">("disconnected");
   const [peerTyping, setPeerTyping] = useState(false);
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
+  const [outgoingCall, setOutgoingCall] = useState<OutgoingCall | null>(null);
   const [activeCall, setActiveCall] = useState<CallState | null>(null);
-  const [recording, setRecording] = useState(false);
+  const [audioRecording, setAudioRecording] = useState(false);
+  const [videoRecording, setVideoRecording] = useState(false);
+  const [mediaPreviews, setMediaPreviews] = useState<Record<string, MediaPreview>>({});
+  const [nicknames, setNicknamesState] = useState<Record<string, string>>({});
+  const [nicknameDraft, setNicknameDraft] = useState("");
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [profileDisplayName, setProfileDisplayName] = useState("");
+  const [profileAvatarUrl, setProfileAvatarUrl] = useState("");
+  const [profileSaving, setProfileSaving] = useState(false);
 
   const authRef = useRef<AuthSession | null>(null);
   const selectedPeerRef = useRef<UserId | null>(null);
   const sharedSecretRef = useRef<string | null>(null);
   const sessionRef = useRef<SessionState | null>(null);
+  const outgoingCallRef = useRef<OutgoingCall | null>(null);
+  const incomingCallRef = useRef<IncomingCall | null>(null);
+  const callTimeoutRef = useRef<number | null>(null);
   const socketRef = useRef<ChatSocket | null>(null);
   const typingSentRef = useRef(false);
-  const recorderRef = useRef<MediaRecorder | null>(null);
+  const audioRecorderRef = useRef<MediaRecorder | null>(null);
+  const videoRecorderRef = useRef<MediaRecorder | null>(null);
+  const videoPreviewRef = useRef<HTMLVideoElement | null>(null);
+  const videoStreamRef = useRef<MediaStream | null>(null);
   const callRef = useRef<ActiveCall | null>(null);
-  const remoteMediaContainerRef = useRef<HTMLDivElement | null>(null);
+  const mediaPreviewsRef = useRef<Record<string, MediaPreview>>({});
 
   const peers = useMemo(() => {
     if (!auth) {
@@ -64,6 +159,32 @@ export default function ChatPage() {
     }
     return auth.users.filter((entry) => entry.id !== auth.userId);
   }, [auth]);
+
+  const selectedPeer = useMemo(() => {
+    if (!auth || !selectedPeerId) {
+      return null;
+    }
+    return auth.users.find((entry) => entry.id === selectedPeerId) ?? null;
+  }, [auth, selectedPeerId]);
+
+  const displayNameForUser = useCallback(
+    (userId: UserId) => {
+      const nickname = nicknames[userId];
+      if (nickname) {
+        return nickname;
+      }
+      const directoryUser = authRef.current?.users.find((entry) => entry.id === userId);
+      return directoryUser?.displayName ?? userId;
+    },
+    [nicknames]
+  );
+
+  const clearCallTimeout = useCallback(() => {
+    if (callTimeoutRef.current !== null) {
+      window.clearTimeout(callTimeoutRef.current);
+      callTimeoutRef.current = null;
+    }
+  }, []);
 
   const persistMessages = useCallback(async (nextMessages: UiMessage[]) => {
     const userId = authRef.current?.userId;
@@ -85,6 +206,26 @@ export default function ChatPage() {
       await setLastServerId(userId, nextLastId);
     }
   }, []);
+
+  useEffect(() => {
+    outgoingCallRef.current = outgoingCall;
+  }, [outgoingCall]);
+
+  useEffect(() => {
+    incomingCallRef.current = incomingCall;
+  }, [incomingCall]);
+
+  useEffect(() => {
+    mediaPreviewsRef.current = mediaPreviews;
+  }, [mediaPreviews]);
+
+  useEffect(() => {
+    if (!selectedPeerId) {
+      setNicknameDraft("");
+      return;
+    }
+    setNicknameDraft(nicknames[selectedPeerId] ?? "");
+  }, [nicknames, selectedPeerId]);
 
   const mergeMessage = useCallback(
     async (message: UiMessage) => {
@@ -209,21 +350,45 @@ export default function ChatPage() {
         );
       }
 
+      clearCallTimeout();
+
+      if (activeCall?.roomName) {
+        await cancelCallNotification(activeCall.roomName);
+      }
+      if (incomingCallRef.current?.roomName) {
+        await cancelCallNotification(incomingCallRef.current.roomName);
+      }
+
       await endLiveKitConnection(callRef.current);
       callRef.current = null;
       setIncomingCall(null);
+      incomingCallRef.current = null;
+      setOutgoingCall(null);
+      outgoingCallRef.current = null;
       setActiveCall(null);
-      if (remoteMediaContainerRef.current) {
-        remoteMediaContainerRef.current.innerHTML = "";
-      }
     },
-    [activeCall, sendClientEvent]
+    [activeCall, clearCallTimeout, sendClientEvent]
   );
 
   const handleSocketEvent = useCallback(
     async (event: any) => {
       switch (event.type) {
         case "message:recv": {
+          const senderId = event.payload.sender as UserId;
+          const userId = authRef.current?.userId;
+          if (userId && typeof event.payload.id === "number") {
+            const lastSeen = await getLastServerId(userId);
+            if (event.payload.id > lastSeen) {
+              await setLastServerId(userId, event.payload.id);
+            }
+          }
+
+          if (selectedPeerRef.current !== senderId) {
+            await notifyIncomingMessage(
+              displayNameForUser(senderId),
+              event.payload.type === "text" ? "New message" : `${event.payload.type.toUpperCase()} note`
+            );
+          }
           const ui = await decryptServerRecord(event.payload);
           if (ui) {
             await mergeMessage(ui);
@@ -261,17 +426,63 @@ export default function ChatPage() {
           await applyServerRecords(event.payload.messages);
           return;
         case "call:start":
-          setIncomingCall({
+          if (activeCall || outgoingCallRef.current || incomingCallRef.current) {
+            sendClientEvent(
+              makeClientEvent("call:decline", {
+                to: event.payload.to,
+                roomName: event.payload.roomName,
+                callType: event.payload.callType
+              })
+            );
+            return;
+          }
+          const nextIncoming = {
             from: event.payload.to,
             roomName: event.payload.roomName,
             callType: event.payload.callType
+          };
+          setIncomingCall(nextIncoming);
+          incomingCallRef.current = nextIncoming;
+          await notifyIncomingCall({
+            from: displayNameForUser(event.payload.to),
+            callType: event.payload.callType,
+            roomName: event.payload.roomName
           });
+          setStatus(`Incoming ${event.payload.callType} call from ${displayNameForUser(event.payload.to)}`);
+          return;
+        case "call:accept":
+          if (
+            outgoingCallRef.current &&
+            outgoingCallRef.current.peerId === event.payload.to &&
+            outgoingCallRef.current.roomName === event.payload.roomName
+          ) {
+            clearCallTimeout();
+            const pending = outgoingCallRef.current;
+            setOutgoingCall(null);
+            outgoingCallRef.current = null;
+            const call = await createLiveKitConnection(pending.roomName, pending.callType);
+            callRef.current = call;
+            setActiveCall({
+              peerId: pending.peerId,
+              roomName: pending.roomName,
+              callType: pending.callType
+            });
+            setStatus(`Connected with ${displayNameForUser(pending.peerId)}`);
+          }
           return;
         case "call:decline":
-          setStatus("Call declined");
+          if (outgoingCallRef.current && outgoingCallRef.current.peerId === event.payload.to) {
+            clearCallTimeout();
+            setOutgoingCall(null);
+            outgoingCallRef.current = null;
+          }
+          setStatus(`${displayNameForUser(event.payload.to)} declined the call`);
           await terminateCall(false);
           return;
         case "call:end":
+          clearCallTimeout();
+          setOutgoingCall(null);
+          outgoingCallRef.current = null;
           setStatus("Call ended");
           await terminateCall(false);
           return;
@@ -279,7 +490,17 @@ export default function ChatPage() {
           return;
       }
     },
-    [applyServerRecords, decryptServerRecord, mergeMessage, persistMessages, terminateCall]
+    [
+      activeCall,
+      applyServerRecords,
+      clearCallTimeout,
+      decryptServerRecord,
+      displayNameForUser,
+      mergeMessage,
+      persistMessages,
+      sendClientEvent,
+      terminateCall
+    ]
   );
 
   const loadConversationForPeer = useCallback(
@@ -308,15 +529,20 @@ export default function ChatPage() {
 
       const history = await jsonRequest<{ messages: MessageRecord[] }>("/messages?after=0");
       await applyServerRecords(history.messages);
-      setStatus(`Secure channel ready with ${peerId}`);
+      setStatus(`Secure channel ready with ${displayNameForUser(peerId)}`);
     },
-    [applyServerRecords]
+    [applyServerRecords, displayNameForUser]
   );
 
   const bootstrap = useCallback(async () => {
     const session = await fetchSession();
     authRef.current = session;
     setAuth(session);
+    setProfileDisplayName(session.profile.displayName);
+    setProfileAvatarUrl(session.profile.avatarUrl ?? "");
+
+    const storedNicknames = await getNicknames(session.userId);
+    setNicknamesState(storedNicknames);
 
     const identity = await ensureIdentityKey(session.userId);
     if (!session.selfIdentityPublicKey || session.selfIdentityPublicKey !== identity.publicKey) {
@@ -363,10 +589,18 @@ export default function ChatPage() {
     });
 
     return () => {
+      clearCallTimeout();
       socketRef.current?.close();
       void terminateCall(false);
+      const stream = videoStreamRef.current;
+      if (stream) {
+        stream.getTracks().forEach((track) => track.stop());
+      }
+      Object.values(mediaPreviewsRef.current).forEach((entry) => {
+        URL.revokeObjectURL(entry.objectUrl);
+      });
     };
-  }, [bootstrap, router, terminateCall]);
+  }, [bootstrap, clearCallTimeout, router, terminateCall]);
 
   useEffect(() => {
     if (!auth || !selectedPeerId) {
@@ -519,8 +753,20 @@ export default function ChatPage() {
     [mergeMessage, sendClientEvent]
   );
 
-  const startRecording = useCallback(async () => {
-    if (recording) {
+  const stopVideoCaptureStream = useCallback(() => {
+    const stream = videoStreamRef.current;
+    if (stream) {
+      stream.getTracks().forEach((track) => track.stop());
+      videoStreamRef.current = null;
+    }
+
+    if (videoPreviewRef.current) {
+      videoPreviewRef.current.srcObject = null;
+    }
+  }, []);
+
+  const startAudioNote = useCallback(async () => {
+    if (audioRecording || videoRecording) {
       return;
     }
 
@@ -528,7 +774,7 @@ export default function ChatPage() {
     const chunks: BlobPart[] = [];
     const recorder = new MediaRecorder(stream);
 
-    recorderRef.current = recorder;
+    audioRecorderRef.current = recorder;
 
     recorder.ondataavailable = (event) => {
       if (event.data.size > 0) {
@@ -541,16 +787,59 @@ export default function ChatPage() {
       const file = new File([blob], `voice-${Date.now()}.webm`, { type: "audio/webm" });
       void sendMediaFile(file, "audio");
       stream.getTracks().forEach((track) => track.stop());
-      setRecording(false);
-      recorderRef.current = null;
+      setAudioRecording(false);
+      audioRecorderRef.current = null;
     };
 
     recorder.start();
-    setRecording(true);
-  }, [recording, sendMediaFile]);
+    setAudioRecording(true);
+  }, [audioRecording, sendMediaFile, videoRecording]);
 
-  const stopRecording = useCallback(() => {
-    recorderRef.current?.stop();
+  const stopAudioNote = useCallback(() => {
+    audioRecorderRef.current?.stop();
+  }, []);
+
+  const startVideoNote = useCallback(async () => {
+    if (audioRecording || videoRecording) {
+      return;
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+    videoStreamRef.current = stream;
+    if (videoPreviewRef.current) {
+      videoPreviewRef.current.srcObject = stream;
+      void videoPreviewRef.current.play().catch(() => {
+        // Ignore autoplay restrictions.
+      });
+    }
+
+    const chunks: BlobPart[] = [];
+    const candidates = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"];
+    const mimeType = candidates.find((entry) => MediaRecorder.isTypeSupported(entry));
+    const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+
+    videoRecorderRef.current = recorder;
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) {
+        chunks.push(event.data);
+      }
+    };
+
+    recorder.onstop = () => {
+      const blob = new Blob(chunks, { type: mimeType ?? "video/webm" });
+      const file = new File([blob], `video-note-${Date.now()}.webm`, { type: mimeType ?? "video/webm" });
+      void sendMediaFile(file, "video");
+      stopVideoCaptureStream();
+      setVideoRecording(false);
+      videoRecorderRef.current = null;
+    };
+
+    recorder.start();
+    setVideoRecording(true);
+  }, [audioRecording, sendMediaFile, stopVideoCaptureStream, videoRecording]);
+
+  const stopVideoNote = useCallback(() => {
+    videoRecorderRef.current?.stop();
   }, []);
 
   const onDraftChange = useCallback(
@@ -574,42 +863,72 @@ export default function ChatPage() {
     [sendClientEvent]
   );
 
-  const downloadMediaMessage = useCallback(async (message: UiMessage) => {
-    if (!message.media || !sharedSecretRef.current) {
-      return;
-    }
+  const openInlineMedia = useCallback(
+    async (message: UiMessage): Promise<string | null> => {
+      if (!message.media || !sharedSecretRef.current) {
+        return null;
+      }
 
-    await downloadEncryptedMedia(message.media.mediaId);
-    const decrypted = await decryptBinaryPayload(sharedSecretRef.current, message.media.fileEncryptionPayload, {
-      sender: message.sender,
-      recipient: message.recipient,
-      messageId: message.media.fileMetaMessageId,
-      timestamp: message.media.fileMetaTimestamp,
-      type: message.media.fileType
-    });
+      const existing = mediaPreviews[message.media.mediaId];
+      if (existing) {
+        return existing.objectUrl;
+      }
 
-    const mediaBuffer = decrypted.buffer.slice(
-      decrypted.byteOffset,
-      decrypted.byteOffset + decrypted.byteLength
-    ) as ArrayBuffer;
-    const blob = new Blob([mediaBuffer], { type: message.media.mimeType });
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.download = message.media.fileName;
-    link.click();
-    URL.revokeObjectURL(link.href);
+      await downloadEncryptedMedia(message.media.mediaId);
+      const decrypted = await decryptBinaryPayload(sharedSecretRef.current, message.media.fileEncryptionPayload, {
+        sender: message.sender,
+        recipient: message.recipient,
+        messageId: message.media.fileMetaMessageId,
+        timestamp: message.media.fileMetaTimestamp,
+        type: message.media.fileType
+      });
 
-    await ackMedia(message.media.mediaId);
-  }, []);
+      const objectUrl = createBlobUrl(decrypted, message.media.mimeType);
+      setMediaPreviews((current) => ({
+        ...current,
+        [message.media!.mediaId]: {
+          objectUrl,
+          mimeType: message.media!.mimeType
+        }
+      }));
+
+      await ackMedia(message.media.mediaId);
+      return objectUrl;
+    },
+    [mediaPreviews]
+  );
+
+  const downloadMediaMessage = useCallback(
+    async (message: UiMessage) => {
+      if (!message.media) {
+        return;
+      }
+
+      const existing = mediaPreviews[message.media.mediaId];
+      const objectUrl = existing ? existing.objectUrl : await openInlineMedia(message);
+      if (!objectUrl) {
+        return;
+      }
+
+      triggerDownload(message.media.fileName, objectUrl);
+    },
+    [mediaPreviews, openInlineMedia]
+  );
 
   const startCall = useCallback(
     async (callType: "audio" | "video") => {
       const peerId = selectedPeerRef.current;
-      if (!peerId) {
+      if (!peerId || outgoingCallRef.current || incomingCallRef.current || activeCall) {
         return;
       }
 
       const roomName = `lovechat-${Date.now()}`;
+      const pendingCall: OutgoingCall = {
+        peerId,
+        roomName,
+        callType,
+        startedAt: Date.now()
+      };
       sendClientEvent(
         makeClientEvent("call:start", {
           to: peerId,
@@ -618,49 +937,158 @@ export default function ChatPage() {
         })
       );
 
-      const call = await createLiveKitConnection(roomName, callType);
-      callRef.current = call;
-      setActiveCall({ peerId, roomName, callType });
-      if (remoteMediaContainerRef.current) {
-        remoteMediaContainerRef.current.innerHTML = "Call connected. Remote tracks will render automatically.";
-      }
+      setOutgoingCall(pendingCall);
+      outgoingCallRef.current = pendingCall;
+      setStatus(`Calling ${displayNameForUser(peerId)}...`);
+
+      clearCallTimeout();
+      callTimeoutRef.current = window.setTimeout(() => {
+        if (!outgoingCallRef.current || outgoingCallRef.current.roomName !== roomName) {
+          return;
+        }
+
+        sendClientEvent(
+          makeClientEvent("call:end", {
+            to: peerId,
+            roomName
+          })
+        );
+        setOutgoingCall(null);
+        outgoingCallRef.current = null;
+        setStatus("No answer. Call timed out.");
+      }, 30_000);
     },
-    [sendClientEvent]
+    [activeCall, clearCallTimeout, displayNameForUser, sendClientEvent]
   );
 
   const acceptIncomingCall = useCallback(async () => {
-    if (!incomingCall) {
+    const currentIncoming = incomingCallRef.current;
+    if (!currentIncoming || outgoingCallRef.current) {
       return;
     }
+
+    setSelectedPeerId(currentIncoming.from);
+    selectedPeerRef.current = currentIncoming.from;
+    await cancelCallNotification(currentIncoming.roomName);
 
     sendClientEvent(
       makeClientEvent("call:accept", {
-        to: incomingCall.from,
-        roomName: incomingCall.roomName,
-        callType: incomingCall.callType
+        to: currentIncoming.from,
+        roomName: currentIncoming.roomName,
+        callType: currentIncoming.callType
       })
     );
 
-    const call = await createLiveKitConnection(incomingCall.roomName, incomingCall.callType);
+    const call = await createLiveKitConnection(currentIncoming.roomName, currentIncoming.callType);
     callRef.current = call;
-    setActiveCall({ peerId: incomingCall.from, roomName: incomingCall.roomName, callType: incomingCall.callType });
+    setActiveCall({
+      peerId: currentIncoming.from,
+      roomName: currentIncoming.roomName,
+      callType: currentIncoming.callType
+    });
     setIncomingCall(null);
-  }, [incomingCall, sendClientEvent]);
+    incomingCallRef.current = null;
+    setStatus(`Connected with ${displayNameForUser(currentIncoming.from)}`);
+  }, [displayNameForUser, sendClientEvent]);
 
   const declineIncomingCall = useCallback(() => {
-    if (!incomingCall) {
+    const currentIncoming = incomingCallRef.current;
+    if (!currentIncoming) {
       return;
     }
 
+    void cancelCallNotification(currentIncoming.roomName);
+
     sendClientEvent(
       makeClientEvent("call:decline", {
-        to: incomingCall.from,
-        roomName: incomingCall.roomName,
-        callType: incomingCall.callType
+        to: currentIncoming.from,
+        roomName: currentIncoming.roomName,
+        callType: currentIncoming.callType
       })
     );
     setIncomingCall(null);
-  }, [incomingCall, sendClientEvent]);
+    incomingCallRef.current = null;
+    setStatus("Call declined");
+  }, [sendClientEvent]);
+
+  useEffect(() => {
+    void initializeNotifications(async (payload, actionId) => {
+      if (payload.kind !== "call" || !payload.roomName) {
+        return;
+      }
+
+      const currentIncoming = incomingCallRef.current;
+      if (!currentIncoming || currentIncoming.roomName !== payload.roomName) {
+        return;
+      }
+
+      if (actionId === "accept") {
+        await acceptIncomingCall();
+      }
+      if (actionId === "decline") {
+        declineIncomingCall();
+      }
+    });
+  }, [acceptIncomingCall, declineIncomingCall]);
+
+  const saveNickname = useCallback(async () => {
+    const currentAuth = authRef.current;
+    const peerId = selectedPeerRef.current;
+    if (!currentAuth || !peerId) {
+      return;
+    }
+
+    await setNickname(currentAuth.userId, peerId, nicknameDraft);
+    setNicknamesState((current) => {
+      const next = {
+        ...current
+      };
+      const trimmed = nicknameDraft.trim();
+      if (trimmed) {
+        next[peerId] = trimmed;
+      } else {
+        delete next[peerId];
+      }
+      return next;
+    });
+  }, [nicknameDraft]);
+
+  const saveProfile = useCallback(async () => {
+    const currentAuth = authRef.current;
+    if (!currentAuth) {
+      return;
+    }
+
+    setProfileSaving(true);
+    try {
+      const displayName = profileDisplayName.trim() || currentAuth.profile.displayName;
+      const avatarUrl = profileAvatarUrl.trim() || undefined;
+      const response = await updateProfile({
+        displayName,
+        avatarUrl
+      });
+
+      const nextAuth: AuthSession = {
+        ...currentAuth,
+        profile: response.profile,
+        users: currentAuth.users.map((entry) =>
+          entry.id === currentAuth.userId
+            ? {
+                ...entry,
+                displayName: response.profile.displayName,
+                avatarUrl: response.profile.avatarUrl
+              }
+            : entry
+        )
+      };
+      authRef.current = nextAuth;
+      setAuth(nextAuth);
+      setProfileOpen(false);
+      setStatus("Profile updated");
+    } finally {
+      setProfileSaving(false);
+    }
+  }, [profileAvatarUrl, profileDisplayName]);
 
   const handleLogout = useCallback(async () => {
     await logout();
@@ -672,67 +1100,127 @@ export default function ChatPage() {
     if (!auth) {
       return "LoveChat";
     }
-    return selectedPeerId ? `${auth.userId} -> ${selectedPeerId}` : auth.userId;
-  }, [auth, selectedPeerId]);
+    const selfName = auth.profile.displayName || auth.userId;
+    if (!selectedPeerId) {
+      return selfName;
+    }
+    return `${selfName} -> ${displayNameForUser(selectedPeerId)}`;
+  }, [auth, displayNameForUser, selectedPeerId]);
 
   return (
-    <main className="shell" style={{ minHeight: "100vh", paddingTop: "1rem", paddingBottom: "1rem" }}>
+    <main className="shell chat-shell" style={{ minHeight: "100vh", paddingTop: "0.75rem", paddingBottom: "0.75rem" }}>
       <section className="panel" style={{ padding: "1rem", marginBottom: "0.8rem" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.8rem", flexWrap: "wrap" }}>
-          <div>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+            <Avatar
+              name={auth?.profile.displayName ?? "Me"}
+              avatarUrl={auth?.profile.avatarUrl}
+              size={36}
+            />
+            {selectedPeer ? (
+              <>
+                <span style={{ opacity: 0.7 }}>→</span>
+                <Avatar
+                  name={displayNameForUser(selectedPeer.id)}
+                  avatarUrl={selectedPeer.avatarUrl}
+                  size={36}
+                />
+              </>
+            ) : null}
+            <div>
             <h1 style={{ margin: 0 }}>{heading}</h1>
             <p className="muted" style={{ marginBottom: 0 }}>
               Socket: {socketStatus} | {status}
             </p>
+            </div>
           </div>
-          <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
-            <button className="secondary" onClick={() => void startCall("audio")} disabled={!selectedPeerId || !!activeCall}>
-              Audio Call
+          <div style={{ display: "flex", gap: "0.45rem", flexWrap: "wrap" }}>
+            <button
+              className="secondary"
+              onClick={() => void startCall("audio")}
+              disabled={!selectedPeerId || !!activeCall || !!outgoingCall}
+            >
+              📞 Audio
             </button>
-            <button className="secondary" onClick={() => void startCall("video")} disabled={!selectedPeerId || !!activeCall}>
-              Video Call
+            <button
+              className="secondary"
+              onClick={() => void startCall("video")}
+              disabled={!selectedPeerId || !!activeCall || !!outgoingCall}
+            >
+              🎥 Video
+            </button>
+            <button className="secondary" onClick={() => setProfileOpen((current) => !current)}>
+              ⚙️ Profile
             </button>
             <button className="warn" onClick={() => void handleLogout()}>
               Logout
             </button>
           </div>
         </div>
-        <div style={{ marginTop: "0.8rem" }}>
-          <label htmlFor="peer-select" style={{ display: "block", marginBottom: "0.4rem" }}>
-            Chat With
-          </label>
-          <select
-            id="peer-select"
-            value={selectedPeerId ?? ""}
-            onChange={(event) => {
-              const nextPeer = event.target.value as UserId;
-              if (!nextPeer) {
-                return;
-              }
-              if (typingSentRef.current && selectedPeerRef.current) {
-                sendClientEvent(makeClientEvent("typing:stop", { to: selectedPeerRef.current }));
-                typingSentRef.current = false;
-              }
-              setDraft("");
-              setSelectedPeerId(nextPeer);
-            }}
-          >
-            <option value="" disabled>
-              {peers.length ? "Select a user" : "No users available"}
-            </option>
-            {peers.map((entry) => (
-              <option key={entry.id} value={entry.id}>
-                {entry.displayName} ({entry.id})
+
+        <div
+          style={{
+            marginTop: "0.8rem",
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+            gap: "0.7rem"
+          }}
+        >
+          <div>
+            <label htmlFor="peer-select" style={{ display: "block", marginBottom: "0.4rem" }}>
+              Chat With
+            </label>
+            <select
+              id="peer-select"
+              value={selectedPeerId ?? ""}
+              onChange={(event) => {
+                const nextPeer = event.target.value as UserId;
+                if (!nextPeer) {
+                  return;
+                }
+                if (typingSentRef.current && selectedPeerRef.current) {
+                  sendClientEvent(makeClientEvent("typing:stop", { to: selectedPeerRef.current }));
+                  typingSentRef.current = false;
+                }
+                setDraft("");
+                setSelectedPeerId(nextPeer);
+              }}
+            >
+              <option value="" disabled>
+                {peers.length ? "Select a user" : "No users available"}
               </option>
-            ))}
-          </select>
+              {peers.map((entry) => (
+                <option key={entry.id} value={entry.id}>
+                  {displayNameForUser(entry.id)} ({entry.id})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label htmlFor="nickname-input" style={{ display: "block", marginBottom: "0.4rem" }}>
+              Nickname For This Chat
+            </label>
+            <div style={{ display: "flex", gap: "0.45rem" }}>
+              <input
+                id="nickname-input"
+                value={nicknameDraft}
+                onChange={(event) => setNicknameDraft(event.target.value)}
+                placeholder="Set custom name"
+                disabled={!selectedPeerId}
+              />
+              <button className="secondary" onClick={() => void saveNickname()} disabled={!selectedPeerId}>
+                Save
+              </button>
+            </div>
+          </div>
         </div>
       </section>
 
       {incomingCall ? (
         <section className="panel" style={{ padding: "1rem", marginBottom: "0.8rem" }}>
           <strong>
-            Incoming {incomingCall.callType} call from {incomingCall.from}
+            Incoming {incomingCall.callType} call from {displayNameForUser(incomingCall.from)}
           </strong>
           <div style={{ marginTop: "0.7rem", display: "flex", gap: "0.6rem" }}>
             <button onClick={() => void acceptIncomingCall()}>Accept</button>
@@ -743,14 +1231,37 @@ export default function ChatPage() {
         </section>
       ) : null}
 
+      {outgoingCall ? (
+        <section className="panel" style={{ padding: "0.8rem", marginBottom: "0.8rem" }}>
+          Calling {displayNameForUser(outgoingCall.peerId)} ({outgoingCall.callType})...
+        </section>
+      ) : null}
+
       {activeCall ? (
         <section className="panel" style={{ padding: "1rem", marginBottom: "0.8rem" }}>
           <strong>
-            In call with {activeCall.peerId}: {activeCall.callType} ({activeCall.roomName})
+            In call with {displayNameForUser(activeCall.peerId)}: {activeCall.callType}
           </strong>
-          <div ref={remoteMediaContainerRef} style={{ marginTop: "0.8rem" }} />
+          <p className="muted" style={{ marginBottom: "0.6rem" }}>
+            Room: {activeCall.roomName}
+          </p>
           <button className="warn" style={{ marginTop: "0.7rem" }} onClick={() => void terminateCall(true)}>
             End Call
+          </button>
+        </section>
+      ) : null}
+
+      {videoRecording ? (
+        <section className="panel" style={{ padding: "0.8rem", marginBottom: "0.8rem" }}>
+          <p style={{ marginTop: 0, marginBottom: "0.45rem" }}>Recording video note...</p>
+          <video
+            ref={videoPreviewRef}
+            playsInline
+            muted
+            style={{ width: "100%", borderRadius: "12px", maxHeight: "220px", objectFit: "cover" }}
+          />
+          <button className="warn" style={{ marginTop: "0.65rem" }} onClick={stopVideoNote}>
+            Stop Video Note
           </button>
         </section>
       ) : null}
@@ -758,6 +1269,7 @@ export default function ChatPage() {
       <section className="panel" style={{ minHeight: "48vh", maxHeight: "54vh", overflowY: "auto", padding: "1rem" }}>
         {messages.map((message) => {
           const own = auth?.userId === message.sender;
+          const mediaPreview = message.media ? mediaPreviews[message.media.mediaId] : null;
           return (
             <article
               key={`${message.clientMessageId}-${message.serverId ?? "local"}`}
@@ -777,7 +1289,7 @@ export default function ChatPage() {
                 }}
               >
                 <small className="muted" style={{ display: "block", marginBottom: "0.35rem" }}>
-                  {message.sender} | {new Date(message.createdAt).toLocaleTimeString()} | {message.status}
+                  {displayNameForUser(message.sender)} | {formatTime(message.createdAt)} | {message.status}
                 </small>
 
                 {message.text ? <div style={{ whiteSpace: "pre-wrap" }}>{message.text}</div> : null}
@@ -787,9 +1299,40 @@ export default function ChatPage() {
                     <p style={{ marginTop: "0.2rem", marginBottom: "0.5rem" }}>
                       {message.type.toUpperCase()}: {message.media.fileName}
                     </p>
-                    <button className="secondary" onClick={() => void downloadMediaMessage(message)}>
-                      Download
-                    </button>
+
+                    {mediaPreview && isInlineMedia(mediaPreview.mimeType) ? (
+                      <div style={{ marginBottom: "0.5rem" }}>
+                        {mediaPreview.mimeType.startsWith("audio/") ? (
+                          <audio controls src={mediaPreview.objectUrl} style={{ width: "100%" }} />
+                        ) : null}
+                        {mediaPreview.mimeType.startsWith("video/") ? (
+                          <video
+                            controls
+                            playsInline
+                            src={mediaPreview.objectUrl}
+                            style={{ width: "100%", borderRadius: "10px" }}
+                          />
+                        ) : null}
+                        {mediaPreview.mimeType.startsWith("image/") ? (
+                          <img
+                            src={mediaPreview.objectUrl}
+                            alt={message.media.fileName}
+                            style={{ width: "100%", borderRadius: "10px" }}
+                          />
+                        ) : null}
+                      </div>
+                    ) : null}
+
+                    <div style={{ display: "flex", gap: "0.45rem", flexWrap: "wrap" }}>
+                      {!mediaPreview ? (
+                        <button className="secondary" onClick={() => void openInlineMedia(message)}>
+                          Open
+                        </button>
+                      ) : null}
+                      <button className="secondary" onClick={() => void downloadMediaMessage(message)}>
+                        Save
+                      </button>
+                    </div>
                   </div>
                 ) : null}
               </div>
@@ -797,7 +1340,7 @@ export default function ChatPage() {
           );
         })}
 
-        {peerTyping && selectedPeerId ? <p className="muted">{selectedPeerId} is typing...</p> : null}
+        {peerTyping && selectedPeerId ? <p className="muted">{displayNameForUser(selectedPeerId)} is typing...</p> : null}
       </section>
 
       <section className="panel" style={{ padding: "1rem", marginTop: "0.8rem" }}>
@@ -814,7 +1357,7 @@ export default function ChatPage() {
 
           <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap" }}>
             <button onClick={() => void sendText()} disabled={!selectedPeerId || !draft.trim()}>
-              Send
+              ➤ Send
             </button>
 
             <label style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}>
@@ -840,22 +1383,70 @@ export default function ChatPage() {
                 }}
                 disabled={!selectedPeerId}
               >
-                Upload Media
+                📎 Upload
               </button>
             </label>
 
-            {!recording ? (
-              <button className="secondary" onClick={() => void startRecording()} disabled={!selectedPeerId}>
-                Voice Note
+            {!audioRecording ? (
+              <button
+                className="secondary"
+                onClick={() => void startAudioNote()}
+                disabled={!selectedPeerId || videoRecording}
+              >
+                🎙️ Voice Note
               </button>
             ) : (
-              <button className="warn" onClick={stopRecording}>
-                Stop Recording
+              <button className="warn" onClick={stopAudioNote}>
+                Stop Voice
               </button>
             )}
+
+            {!videoRecording ? (
+              <button
+                className="secondary"
+                onClick={() => void startVideoNote()}
+                disabled={!selectedPeerId || audioRecording}
+              >
+                🎬 Video Note
+              </button>
+            ) : null}
           </div>
         </div>
       </section>
+
+      {profileOpen ? (
+        <section className="panel" style={{ padding: "1rem", marginTop: "0.8rem" }}>
+          <h2 style={{ marginTop: 0 }}>Account</h2>
+          <label htmlFor="profile-display-name" style={{ display: "block", marginBottom: "0.35rem" }}>
+            Display Name
+          </label>
+          <input
+            id="profile-display-name"
+            value={profileDisplayName}
+            onChange={(event) => setProfileDisplayName(event.target.value)}
+            placeholder="Your display name"
+          />
+
+          <label htmlFor="profile-avatar-url" style={{ display: "block", marginTop: "0.75rem", marginBottom: "0.35rem" }}>
+            Avatar URL
+          </label>
+          <input
+            id="profile-avatar-url"
+            value={profileAvatarUrl}
+            onChange={(event) => setProfileAvatarUrl(event.target.value)}
+            placeholder="https://example.com/avatar.jpg"
+          />
+
+          <div style={{ marginTop: "0.85rem", display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+            <button onClick={() => void saveProfile()} disabled={profileSaving}>
+              Save Profile
+            </button>
+            <button className="secondary" onClick={() => setProfileOpen(false)} disabled={profileSaving}>
+              Close
+            </button>
+          </div>
+        </section>
+      ) : null}
     </main>
   );
 }

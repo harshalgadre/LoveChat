@@ -37,6 +37,10 @@ main.shell {
   padding: 1.25rem;
 }
 
+main.chat-shell {
+  max-width: 920px;
+}
+
 .panel {
   background: var(--card);
   border: 1px solid rgba(159, 195, 209, 0.22);
@@ -96,5 +100,9 @@ p.muted {
 @media (max-width: 720px) {
   main.shell {
     padding: 0.85rem;
+  }
+
+  main.chat-shell {
+    padding: 0.7rem;
   }
 }

@@ -45,3 +45,28 @@ export async function getLastServerId(userId: string): Promise<number> {
 export async function setLastServerId(userId: string, value: number): Promise<void> {
   await set(key("lastServerId", userId), value, store);
 }
+
+export async function getNicknames(userId: string): Promise<Record<string, string>> {
+  return (await get<Record<string, string>>(key("nicknames", userId), store)) ?? {};
+}
+
+export async function getNickname(userId: string, peerId: string): Promise<string | null> {
+  const nicknames = await getNicknames(userId);
+  return nicknames[peerId] ?? null;
+}
+
+export async function setNickname(userId: string, peerId: string, nickname: string): Promise<void> {
+  const current = await getNicknames(userId);
+  const next = {
+    ...current
+  };
+
+  const trimmed = nickname.trim();
+  if (trimmed) {
+    next[peerId] = trimmed;
+  } else {
+    delete next[peerId];
+  }
+
+  await set(key("nicknames", userId), next, store);
+}

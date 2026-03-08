@@ -21,6 +21,7 @@ interface CreateUserInput {
 export interface UserDirectoryEntry {
   id: UserId;
   displayName: string;
+  avatarUrl: string | null;
   identityPublicKey: string | null;
 }
 
@@ -43,6 +44,7 @@ export class UsersService {
     return users.map((user) => ({
       id: user.id,
       displayName: user.displayName,
+      avatarUrl: user.avatarUrl ?? null,
       identityPublicKey: user.identityPublicKey ?? null
     }));
   }
@@ -175,5 +177,35 @@ export class UsersService {
   async getIdentityPublicKey(userId: UserId): Promise<string | null> {
     const user = await this.getUser(userId);
     return user.identityPublicKey ?? null;
+  }
+
+  async updateProfile(
+    userId: UserId,
+    input: {
+      displayName?: string;
+      avatarUrl?: string;
+    }
+  ): Promise<UserRecord> {
+    const update: Record<string, unknown> = {};
+    if (input.displayName !== undefined) {
+      update.displayName = input.displayName;
+    }
+    if (input.avatarUrl !== undefined) {
+      update.avatarUrl = input.avatarUrl;
+    }
+
+    if (!Object.keys(update).length) {
+      return this.getUser(userId);
+    }
+
+    const { users } = await getCollections();
+    await users.updateOne(
+      { id: userId },
+      {
+        $set: update
+      }
+    );
+
+    return this.getUser(userId);
   }
 }

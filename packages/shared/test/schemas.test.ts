@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { ClientEventSchema, MessageStoreSchema, ServerEventSchema, UserStoreSchema } from "../src/schemas";
+import {
+  ClientEventSchema,
+  MessageStoreSchema,
+  ProfileUpdateSchema,
+  ServerEventSchema,
+  UserStoreSchema
+} from "../src/schemas";
 
 describe("schemas", () => {
   it("validates user store with up to five users", () => {
@@ -105,5 +111,14 @@ describe("schemas", () => {
     });
 
     expect(parsed.messages[0].encryptedPayload.algorithm).toBe("AES-256-GCM");
+  });
+
+  it("validates profile update payload", () => {
+    const parsed = ProfileUpdateSchema.parse({
+      displayName: "Harshal G",
+      avatarUrl: "https://example.com/avatar.png"
+    });
+
+    expect(parsed.displayName).toBe("Harshal G");
   });
 });

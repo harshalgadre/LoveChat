@@ -6,6 +6,7 @@ import {
   AuthVerifyLoginRequestSchema,
   AuthVerifyRegisterRequestSchema,
   IdentityKeyUpdateSchema,
+  ProfileUpdateSchema,
   type UserId
 } from "@love-chat/shared";
 
@@ -44,6 +45,12 @@ async function buildAuthResponse(deps: AuthRouteDeps, userId: UserId, sessionTok
     sessionToken,
     wsToken,
     selfIdentityPublicKey: self.identityPublicKey ?? null,
+    profile: {
+      id: self.id,
+      displayName: self.displayName,
+      avatarUrl: self.avatarUrl ?? null,
+      phoneNumber: self.phoneNumber
+    },
     users
   };
 }
@@ -201,5 +208,28 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDe
 
     await deps.usersService.setIdentityPublicKey(userId, parsed.data.publicKey);
     return reply.send({ ok: true });
+  });
+
+  app.post("/profile", async (request, reply) => {
+    const userId = await requireUser(request, reply);
+    if (!userId) {
+      return;
+    }
+
+    const parsed = ProfileUpdateSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "INVALID_BODY", details: parsed.error.flatten() });
+    }
+
+    const updated = await deps.usersService.updateProfile(userId, parsed.data);
+    return reply.send({
+      ok: true,
+      profile: {
+        id: updated.id,
+        displayName: updated.displayName,
+        avatarUrl: updated.avatarUrl ?? null,
+        phoneNumber: updated.phoneNumber
+      }
+    });
   });
 }

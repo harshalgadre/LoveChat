@@ -19,6 +19,7 @@
     "@capacitor/camera": "^7.0.1",
     "@capacitor/core": "^7.1.0",
     "@capacitor/filesystem": "^7.0.1",
+    "@capacitor/local-notifications": "^7.0.1",
     "@capacitor/network": "^7.0.1",
     "@capacitor/push-notifications": "^7.0.1",
     "@love-chat/shared": "0.1.0",

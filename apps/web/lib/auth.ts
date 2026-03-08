@@ -77,6 +77,21 @@ export async function updateIdentityPublicKey(publicKey: string): Promise<void> 
   });
 }
 
+export async function updateProfile(input: { displayName?: string; avatarUrl?: string }) {
+  return jsonRequest<{
+    ok: boolean;
+    profile: {
+      id: UserId;
+      displayName: string;
+      avatarUrl: string | null;
+      phoneNumber: string;
+    };
+  }>("/profile", {
+    method: "POST",
+    body: input
+  });
+}
+
 export async function logout(): Promise<void> {
   try {
     await jsonRequest<{ ok: boolean }>("/auth/logout", {
