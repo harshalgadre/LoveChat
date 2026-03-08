@@ -8,18 +8,20 @@ import type { AuthSession } from "./types";
 
 interface ChallengePayload {
   username: UserId;
+  phoneNumber?: string;
 }
 
 interface VerifyPayload {
   username: UserId;
+  phoneNumber?: string;
   response: unknown;
   identityPublicKey?: string;
 }
 
-export async function registerPasskey(userId: UserId, identityPublicKey: string) {
+export async function registerPasskey(userId: UserId, phoneNumber: string, identityPublicKey: string) {
   const options = await jsonRequest<any>("/auth/challenge/register", {
     method: "POST",
-    body: { username: userId } satisfies ChallengePayload
+    body: { username: userId, phoneNumber } satisfies ChallengePayload
   });
 
   const credential = await startRegistration({ optionsJSON: options });
@@ -28,6 +30,7 @@ export async function registerPasskey(userId: UserId, identityPublicKey: string)
     method: "POST",
     body: {
       username: userId,
+      phoneNumber,
       response: credential,
       identityPublicKey
     } satisfies VerifyPayload

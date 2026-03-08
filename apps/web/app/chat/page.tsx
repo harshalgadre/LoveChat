@@ -23,6 +23,7 @@ import type { AuthSession, MediaDescriptor, UiMessage } from "../../lib/types";
 import { ChatSocket, makeClientEvent } from "../../lib/wsClient";
 
 type CallState = {
+  peerId: UserId;
   roomName: string;
   callType: "audio" | "video";
 };
@@ -37,6 +38,7 @@ export default function ChatPage() {
   const router = useRouter();
 
   const [auth, setAuth] = useState<AuthSession | null>(null);
+  const [selectedPeerId, setSelectedPeerId] = useState<UserId | null>(null);
   const [messages, setMessagesState] = useState<UiMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [status, setStatus] = useState("Initializing...");
@@ -47,6 +49,7 @@ export default function ChatPage() {
   const [recording, setRecording] = useState(false);
 
   const authRef = useRef<AuthSession | null>(null);
+  const selectedPeerRef = useRef<UserId | null>(null);
   const sharedSecretRef = useRef<string | null>(null);
   const sessionRef = useRef<SessionState | null>(null);
   const socketRef = useRef<ChatSocket | null>(null);
@@ -55,20 +58,32 @@ export default function ChatPage() {
   const callRef = useRef<ActiveCall | null>(null);
   const remoteMediaContainerRef = useRef<HTMLDivElement | null>(null);
 
+  const peers = useMemo(() => {
+    if (!auth) {
+      return [] as AuthSession["users"];
+    }
+    return auth.users.filter((entry) => entry.id !== auth.userId);
+  }, [auth]);
+
   const persistMessages = useCallback(async (nextMessages: UiMessage[]) => {
     const userId = authRef.current?.userId;
-    if (!userId) {
+    const peerId = selectedPeerRef.current;
+    if (!userId || !peerId) {
       return;
     }
 
-    await setMessages(userId, nextMessages);
+    await setMessages(userId, peerId, nextMessages);
     const maxServerId = nextMessages.reduce((acc, item) => {
       if (item.serverId && item.serverId > acc) {
         return item.serverId;
       }
       return acc;
     }, 0);
-    await setLastServerId(userId, maxServerId);
+    const previousLastId = await getLastServerId(userId);
+    const nextLastId = Math.max(previousLastId, maxServerId);
+    if (nextLastId !== previousLastId) {
+      await setLastServerId(userId, nextLastId);
+    }
   }, []);
 
   const mergeMessage = useCallback(
@@ -100,8 +115,17 @@ export default function ChatPage() {
   );
 
   const decryptServerRecord = useCallback(async (record: MessageRecord): Promise<UiMessage | null> => {
+    const currentAuth = authRef.current;
+    const peerId = selectedPeerRef.current;
     const sharedSecret = sharedSecretRef.current;
-    if (!sharedSecret) {
+    if (!currentAuth || !peerId || !sharedSecret) {
+      return null;
+    }
+
+    const belongsToSelectedConversation =
+      (record.sender === currentAuth.userId && record.recipient === peerId) ||
+      (record.sender === peerId && record.recipient === currentAuth.userId);
+    if (!belongsToSelectedConversation) {
       return null;
     }
 
@@ -176,11 +200,10 @@ export default function ChatPage() {
 
   const terminateCall = useCallback(
     async (notifyPeer: boolean) => {
-      const currentAuth = authRef.current;
-      if (notifyPeer && currentAuth && activeCall) {
+      if (notifyPeer && activeCall) {
         sendClientEvent(
           makeClientEvent("call:end", {
-            to: currentAuth.peerId,
+            to: activeCall.peerId,
             roomName: activeCall.roomName
           })
         );
@@ -208,6 +231,9 @@ export default function ChatPage() {
           return;
         }
         case "message:ack": {
+          if (selectedPeerRef.current && event.payload.to && event.payload.to !== selectedPeerRef.current) {
+            return;
+          }
           setMessagesState((current) => {
             const next = current.map((entry) =>
               event.payload.clientMessageId && entry.clientMessageId === event.payload.clientMessageId
@@ -224,10 +250,12 @@ export default function ChatPage() {
           return;
         }
         case "typing:start":
-          setPeerTyping(true);
+          setPeerTyping(event.payload.to === selectedPeerRef.current);
           return;
         case "typing:stop":
-          setPeerTyping(false);
+          if (event.payload.to === selectedPeerRef.current) {
+            setPeerTyping(false);
+          }
           return;
         case "sync:batch":
           await applyServerRecords(event.payload.messages);
@@ -254,30 +282,55 @@ export default function ChatPage() {
     [applyServerRecords, decryptServerRecord, mergeMessage, persistMessages, terminateCall]
   );
 
+  const loadConversationForPeer = useCallback(
+    async (peerId: UserId, sourceSession?: AuthSession) => {
+      const currentSession = sourceSession ?? authRef.current;
+      if (!currentSession) {
+        return;
+      }
+
+      selectedPeerRef.current = peerId;
+      const localMessages = await getMessages(currentSession.userId, peerId);
+      setMessagesState(localMessages);
+      setPeerTyping(false);
+
+      const peer = currentSession.users.find((item) => item.id === peerId);
+      if (!peer?.identityPublicKey) {
+        sharedSecretRef.current = null;
+        sessionRef.current = null;
+        setStatus(`"${peerId}" has no identity key yet. Ask them to login once.`);
+        return;
+      }
+
+      const context = await ensureConversationCrypto(currentSession.userId, peerId, peer.identityPublicKey);
+      sharedSecretRef.current = context.sharedSecret;
+      sessionRef.current = context.session;
+
+      const history = await jsonRequest<{ messages: MessageRecord[] }>("/messages?after=0");
+      await applyServerRecords(history.messages);
+      setStatus(`Secure channel ready with ${peerId}`);
+    },
+    [applyServerRecords]
+  );
+
   const bootstrap = useCallback(async () => {
     const session = await fetchSession();
     authRef.current = session;
     setAuth(session);
-
-    const localMessages = await getMessages(session.userId);
-    setMessagesState(localMessages);
 
     const identity = await ensureIdentityKey(session.userId);
     if (!session.selfIdentityPublicKey || session.selfIdentityPublicKey !== identity.publicKey) {
       await updateIdentityPublicKey(identity.publicKey);
     }
 
-    if (!session.peerIdentityPublicKey) {
-      setStatus("Peer identity key not available. Ask peer to register/login first.");
+    const peers = session.users.filter((item) => item.id !== session.userId);
+    if (peers.length > 0) {
+      const defaultPeerId = peers[0]!.id;
+      setSelectedPeerId(defaultPeerId);
+      await loadConversationForPeer(defaultPeerId, session);
     } else {
-      const context = await ensureConversationCrypto(session.userId, session.peerIdentityPublicKey);
-      sharedSecretRef.current = context.sharedSecret;
-      sessionRef.current = context.session;
-
-      const lastId = await getLastServerId(session.userId);
-      const history = await jsonRequest<{ messages: MessageRecord[] }>(`/messages?after=${lastId}`);
-      await applyServerRecords(history.messages);
-      setStatus("Secure channel ready");
+      setStatus("No contacts available yet. Register another user first.");
+      setMessagesState([]);
     }
 
     const socket = new ChatSocket(
@@ -302,7 +355,7 @@ export default function ChatPage() {
 
     socket.connect();
     socketRef.current = socket;
-  }, [applyServerRecords, handleSocketEvent]);
+  }, [handleSocketEvent, loadConversationForPeer]);
 
   useEffect(() => {
     bootstrap().catch(() => {
@@ -315,20 +368,29 @@ export default function ChatPage() {
     };
   }, [bootstrap, router, terminateCall]);
 
+  useEffect(() => {
+    if (!auth || !selectedPeerId) {
+      return;
+    }
+
+    void loadConversationForPeer(selectedPeerId, auth);
+  }, [auth, loadConversationForPeer, selectedPeerId]);
+
   const sendText = useCallback(async () => {
     const currentAuth = authRef.current;
+    const peerId = selectedPeerRef.current;
     const sessionState = sessionRef.current;
 
-    if (!currentAuth || !sessionState || !draft.trim()) {
+    if (!currentAuth || !peerId || !sessionState || !draft.trim()) {
       return;
     }
 
     const createdAt = Date.now();
     const clientMessageId = crypto.randomUUID();
 
-    const encrypted = await encryptTextWithSession(currentAuth.userId, sessionState, draft.trim(), {
+    const encrypted = await encryptTextWithSession(currentAuth.userId, peerId, sessionState, draft.trim(), {
       sender: currentAuth.userId,
-      recipient: currentAuth.peerId,
+      recipient: peerId,
       messageId: clientMessageId,
       timestamp: createdAt,
       type: "text"
@@ -337,7 +399,7 @@ export default function ChatPage() {
 
     sendClientEvent(
       makeClientEvent("message:send", {
-        to: currentAuth.peerId,
+        to: peerId,
         type: "text",
         encryptedPayload: encrypted.payload,
         clientMessageId
@@ -348,7 +410,7 @@ export default function ChatPage() {
       localId: clientMessageId,
       clientMessageId,
       sender: currentAuth.userId,
-      recipient: currentAuth.peerId,
+      recipient: peerId,
       type: "text",
       text: draft.trim(),
       createdAt,
@@ -357,7 +419,7 @@ export default function ChatPage() {
 
     setDraft("");
     if (typingSentRef.current) {
-      sendClientEvent(makeClientEvent("typing:stop", { to: currentAuth.peerId }));
+      sendClientEvent(makeClientEvent("typing:stop", { to: peerId }));
       typingSentRef.current = false;
     }
   }, [draft, mergeMessage, sendClientEvent]);
@@ -365,8 +427,9 @@ export default function ChatPage() {
   const sendMediaFile = useCallback(
     async (file: File, forcedType?: Extract<MessageType, "image" | "video" | "audio" | "document">) => {
       const currentAuth = authRef.current;
+      const peerId = selectedPeerRef.current;
       const sessionState = sessionRef.current;
-      if (!currentAuth || !sessionState) {
+      if (!currentAuth || !peerId || !sessionState) {
         return;
       }
 
@@ -387,9 +450,9 @@ export default function ChatPage() {
       const fileMetaMessageId = `${clientMessageId}:file`;
       const fileMetaTimestamp = createdAt;
 
-      const encryptedFile = await encryptBytesWithSession(currentAuth.userId, sessionState, fileBytes, {
+      const encryptedFile = await encryptBytesWithSession(currentAuth.userId, peerId, sessionState, fileBytes, {
         sender: currentAuth.userId,
-        recipient: currentAuth.peerId,
+        recipient: peerId,
         messageId: fileMetaMessageId,
         timestamp: fileMetaTimestamp,
         type: messageType
@@ -397,7 +460,7 @@ export default function ChatPage() {
       sessionRef.current = encryptedFile.session;
 
       const upload = await uploadEncryptedMedia({
-        recipient: currentAuth.peerId,
+        recipient: peerId,
         fileName: file.name,
         mimeType: file.type || "application/octet-stream",
         encryptedPayload: encryptedFile.payload,
@@ -419,11 +482,12 @@ export default function ChatPage() {
 
       const encryptedDescriptor = await encryptTextWithSession(
         currentAuth.userId,
+        peerId,
         sessionRef.current,
         JSON.stringify(descriptor),
         {
           sender: currentAuth.userId,
-          recipient: currentAuth.peerId,
+          recipient: peerId,
           messageId: clientMessageId,
           timestamp: createdAt,
           type: messageType
@@ -433,7 +497,7 @@ export default function ChatPage() {
 
       sendClientEvent(
         makeClientEvent("message:send", {
-          to: currentAuth.peerId,
+          to: peerId,
           type: messageType,
           encryptedPayload: encryptedDescriptor.payload,
           mediaId: upload.mediaId,
@@ -445,7 +509,7 @@ export default function ChatPage() {
         localId: clientMessageId,
         clientMessageId,
         sender: currentAuth.userId,
-        recipient: currentAuth.peerId,
+        recipient: peerId,
         type: messageType,
         media: descriptor,
         createdAt,
@@ -492,18 +556,18 @@ export default function ChatPage() {
   const onDraftChange = useCallback(
     (value: string) => {
       setDraft(value);
-      const currentAuth = authRef.current;
-      if (!currentAuth) {
+      const peerId = selectedPeerRef.current;
+      if (!peerId) {
         return;
       }
 
       if (value.trim() && !typingSentRef.current) {
-        sendClientEvent(makeClientEvent("typing:start", { to: currentAuth.peerId }));
+        sendClientEvent(makeClientEvent("typing:start", { to: peerId }));
         typingSentRef.current = true;
       }
 
       if (!value.trim() && typingSentRef.current) {
-        sendClientEvent(makeClientEvent("typing:stop", { to: currentAuth.peerId }));
+        sendClientEvent(makeClientEvent("typing:stop", { to: peerId }));
         typingSentRef.current = false;
       }
     },
@@ -515,7 +579,7 @@ export default function ChatPage() {
       return;
     }
 
-    const encryptedBytes = await downloadEncryptedMedia(message.media.mediaId);
+    await downloadEncryptedMedia(message.media.mediaId);
     const decrypted = await decryptBinaryPayload(sharedSecretRef.current, message.media.fileEncryptionPayload, {
       sender: message.sender,
       recipient: message.recipient,
@@ -540,15 +604,15 @@ export default function ChatPage() {
 
   const startCall = useCallback(
     async (callType: "audio" | "video") => {
-      const currentAuth = authRef.current;
-      if (!currentAuth) {
+      const peerId = selectedPeerRef.current;
+      if (!peerId) {
         return;
       }
 
       const roomName = `lovechat-${Date.now()}`;
       sendClientEvent(
         makeClientEvent("call:start", {
-          to: currentAuth.peerId,
+          to: peerId,
           roomName,
           callType
         })
@@ -556,7 +620,7 @@ export default function ChatPage() {
 
       const call = await createLiveKitConnection(roomName, callType);
       callRef.current = call;
-      setActiveCall({ roomName, callType });
+      setActiveCall({ peerId, roomName, callType });
       if (remoteMediaContainerRef.current) {
         remoteMediaContainerRef.current.innerHTML = "Call connected. Remote tracks will render automatically.";
       }
@@ -565,8 +629,7 @@ export default function ChatPage() {
   );
 
   const acceptIncomingCall = useCallback(async () => {
-    const currentAuth = authRef.current;
-    if (!currentAuth || !incomingCall) {
+    if (!incomingCall) {
       return;
     }
 
@@ -580,13 +643,12 @@ export default function ChatPage() {
 
     const call = await createLiveKitConnection(incomingCall.roomName, incomingCall.callType);
     callRef.current = call;
-    setActiveCall({ roomName: incomingCall.roomName, callType: incomingCall.callType });
+    setActiveCall({ peerId: incomingCall.from, roomName: incomingCall.roomName, callType: incomingCall.callType });
     setIncomingCall(null);
   }, [incomingCall, sendClientEvent]);
 
   const declineIncomingCall = useCallback(() => {
-    const currentAuth = authRef.current;
-    if (!currentAuth || !incomingCall) {
+    if (!incomingCall) {
       return;
     }
 
@@ -610,8 +672,8 @@ export default function ChatPage() {
     if (!auth) {
       return "LoveChat";
     }
-    return `${auth.userId} -> ${auth.peerId}`;
-  }, [auth]);
+    return selectedPeerId ? `${auth.userId} -> ${selectedPeerId}` : auth.userId;
+  }, [auth, selectedPeerId]);
 
   return (
     <main className="shell" style={{ minHeight: "100vh", paddingTop: "1rem", paddingBottom: "1rem" }}>
@@ -624,16 +686,46 @@ export default function ChatPage() {
             </p>
           </div>
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
-            <button className="secondary" onClick={() => void startCall("audio")} disabled={!auth || !!activeCall}>
+            <button className="secondary" onClick={() => void startCall("audio")} disabled={!selectedPeerId || !!activeCall}>
               Audio Call
             </button>
-            <button className="secondary" onClick={() => void startCall("video")} disabled={!auth || !!activeCall}>
+            <button className="secondary" onClick={() => void startCall("video")} disabled={!selectedPeerId || !!activeCall}>
               Video Call
             </button>
             <button className="warn" onClick={() => void handleLogout()}>
               Logout
             </button>
           </div>
+        </div>
+        <div style={{ marginTop: "0.8rem" }}>
+          <label htmlFor="peer-select" style={{ display: "block", marginBottom: "0.4rem" }}>
+            Chat With
+          </label>
+          <select
+            id="peer-select"
+            value={selectedPeerId ?? ""}
+            onChange={(event) => {
+              const nextPeer = event.target.value as UserId;
+              if (!nextPeer) {
+                return;
+              }
+              if (typingSentRef.current && selectedPeerRef.current) {
+                sendClientEvent(makeClientEvent("typing:stop", { to: selectedPeerRef.current }));
+                typingSentRef.current = false;
+              }
+              setDraft("");
+              setSelectedPeerId(nextPeer);
+            }}
+          >
+            <option value="" disabled>
+              {peers.length ? "Select a user" : "No users available"}
+            </option>
+            {peers.map((entry) => (
+              <option key={entry.id} value={entry.id}>
+                {entry.displayName} ({entry.id})
+              </option>
+            ))}
+          </select>
         </div>
       </section>
 
@@ -654,7 +746,7 @@ export default function ChatPage() {
       {activeCall ? (
         <section className="panel" style={{ padding: "1rem", marginBottom: "0.8rem" }}>
           <strong>
-            In call: {activeCall.callType} ({activeCall.roomName})
+            In call with {activeCall.peerId}: {activeCall.callType} ({activeCall.roomName})
           </strong>
           <div ref={remoteMediaContainerRef} style={{ marginTop: "0.8rem" }} />
           <button className="warn" style={{ marginTop: "0.7rem" }} onClick={() => void terminateCall(true)}>
@@ -705,22 +797,23 @@ export default function ChatPage() {
           );
         })}
 
-        {peerTyping ? <p className="muted">Peer is typing...</p> : null}
+        {peerTyping && selectedPeerId ? <p className="muted">{selectedPeerId} is typing...</p> : null}
       </section>
 
       <section className="panel" style={{ padding: "1rem", marginTop: "0.8rem" }}>
         <div style={{ display: "grid", gap: "0.7rem" }}>
           <textarea
             rows={3}
-            placeholder="Type encrypted message..."
+            placeholder={selectedPeerId ? "Type encrypted message..." : "Select a user first..."}
             value={draft}
             onChange={(event) => {
               onDraftChange(event.target.value);
             }}
+            disabled={!selectedPeerId}
           />
 
           <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap" }}>
-            <button onClick={() => void sendText()} disabled={!draft.trim()}>
+            <button onClick={() => void sendText()} disabled={!selectedPeerId || !draft.trim()}>
               Send
             </button>
 
@@ -735,6 +828,7 @@ export default function ChatPage() {
                   }
                   event.currentTarget.value = "";
                 }}
+                disabled={!selectedPeerId}
               />
               <button
                 type="button"
@@ -744,13 +838,14 @@ export default function ChatPage() {
                   const input = label?.querySelector("input[type=file]") as HTMLInputElement | null;
                   input?.click();
                 }}
+                disabled={!selectedPeerId}
               >
                 Upload Media
               </button>
             </label>
 
             {!recording ? (
-              <button className="secondary" onClick={() => void startRecording()}>
+              <button className="secondary" onClick={() => void startRecording()} disabled={!selectedPeerId}>
                 Voice Note
               </button>
             ) : (

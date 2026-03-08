@@ -36,12 +36,13 @@ export async function ensureIdentityKey(userId: string): Promise<IdentityKeyPair
 
 export async function ensureConversationCrypto(
   userId: string,
+  peerId: string,
   peerPublicKey: string
 ): Promise<ConversationCrypto> {
   const identity = await ensureIdentityKey(userId);
   const sharedSecret = computeSharedSecret(identity.privateKey, peerPublicKey);
   const recipientKeyId = await computeKeyId(peerPublicKey);
-  const cachedSession = await getSession(userId);
+  const cachedSession = await getSession(userId, peerId);
 
   let session = cachedSession;
   if (!session || session.senderKeyId !== identity.keyId || session.recipientKeyId !== recipientKeyId) {
@@ -51,7 +52,7 @@ export async function ensureConversationCrypto(
       recipientKeyId: recipientKeyId,
       rotateAfter: 64
     });
-    await setSession(userId, session);
+    await setSession(userId, peerId, session);
   }
 
   return {
@@ -63,25 +64,27 @@ export async function ensureConversationCrypto(
 
 export async function encryptTextWithSession(
   userId: string,
+  peerId: string,
   session: SessionState,
   text: string,
   metadata: EncryptionMetadata
 ): Promise<{ payload: EncryptedPayload; session: SessionState }> {
   const activeSession = shouldRotateSession(session) ? rotateSession(session) : session;
   const encrypted = await encryptPayload(activeSession, text, metadata, 1);
-  await setSession(userId, encrypted.session);
+  await setSession(userId, peerId, encrypted.session);
   return encrypted;
 }
 
 export async function encryptBytesWithSession(
   userId: string,
+  peerId: string,
   session: SessionState,
   bytes: Uint8Array,
   metadata: EncryptionMetadata
 ): Promise<{ payload: EncryptedPayload; session: SessionState }> {
   const activeSession = shouldRotateSession(session) ? rotateSession(session) : session;
   const encrypted = await encryptBinary(activeSession, bytes, metadata, 1);
-  await setSession(userId, encrypted.session);
+  await setSession(userId, peerId, encrypted.session);
   return encrypted;
 }
 

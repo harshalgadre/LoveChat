@@ -2,6 +2,7 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 
 import type { UserId } from "@love-chat/shared";
 
+import { config } from "../config";
 import { getCookieName, verifySessionToken } from "./session";
 
 function readBearerToken(authorizationHeader: string | undefined): string | null {
@@ -28,7 +29,11 @@ export async function requireUser(request: FastifyRequest, reply: FastifyReply):
   const userId = await verifySessionToken(token);
   if (!userId) {
     if (cookieToken) {
-      reply.clearCookie(cookieName);
+      reply.clearCookie(cookieName, {
+        path: "/",
+        sameSite: config.sessionCookieSameSite,
+        secure: config.isProd
+      });
     }
     reply.status(401).send({ error: "INVALID_SESSION" });
     return null;

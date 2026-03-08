@@ -57,6 +57,13 @@ export async function ensureMongoReady(): Promise<void> {
 
   await Promise.all([
     users.createIndex({ id: 1 }, { unique: true }),
+    users.createIndex(
+      { phoneNumber: 1 },
+      {
+        unique: true,
+        partialFilterExpression: { phoneNumber: { $type: "string" } }
+      }
+    ),
     messages.createIndex({ id: 1 }, { unique: true }),
     messages.createIndex({ sender: 1, recipient: 1, id: 1 }),
     media.createIndex({ id: 1 }, { unique: true }),
@@ -64,30 +71,34 @@ export async function ensureMongoReady(): Promise<void> {
     mediaBlobs.createIndex({ expiresAt: 1 })
   ]);
 
-  await Promise.all([
-    users.updateOne(
-      { id: "userA" },
+  // Backward-compat migration for old records created before phone numbers were mandatory.
+  const missingPhone = await users
+    .find({
+      $or: [{ phoneNumber: { $exists: false } }, { phoneNumber: "" }]
+    })
+    .toArray();
+
+  for (let index = 0; index < missingPhone.length; index += 1) {
+    const doc = missingPhone[index];
+    const fallbackPhone = `+1999${String(index + 1).padStart(8, "0")}`;
+    const fallbackDisplayName =
+      typeof doc.displayName === "string" && doc.displayName.trim().length > 0
+        ? doc.displayName
+        : typeof doc.id === "string" && doc.id.length > 0
+          ? `${doc.id[0]!.toUpperCase()}${doc.id.slice(1)}`
+          : "User";
+
+    await users.updateOne(
+      { _id: doc._id },
       {
-        $setOnInsert: {
-          id: "userA",
-          displayName: "User A",
-          webauthnCredentials: []
+        $set: {
+          phoneNumber: fallbackPhone,
+          displayName: fallbackDisplayName,
+          webauthnCredentials: Array.isArray(doc.webauthnCredentials) ? doc.webauthnCredentials : []
         }
-      },
-      { upsert: true }
-    ),
-    users.updateOne(
-      { id: "userB" },
-      {
-        $setOnInsert: {
-          id: "userB",
-          displayName: "User B",
-          webauthnCredentials: []
-        }
-      },
-      { upsert: true }
-    )
-  ]);
+      }
+    );
+  }
 }
 
 export async function nextCounterValue(counterId: string): Promise<number> {

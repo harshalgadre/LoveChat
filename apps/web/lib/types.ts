@@ -26,9 +26,12 @@ export interface UiMessage {
 
 export interface AuthSession {
   userId: UserId;
-  peerId: UserId;
   wsToken: string;
   sessionToken?: string;
   selfIdentityPublicKey: string | null;
-  peerIdentityPublicKey: string | null;
+  users: Array<{
+    id: UserId;
+    displayName: string;
+    identityPublicKey: string | null;
+  }>;
 }

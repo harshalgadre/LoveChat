@@ -1,7 +1,18 @@
 import { z } from "zod";
 
-export const UserIdSchema = z.enum(["userA", "userB"]);
+export const UserIdSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .min(3)
+  .max(24)
+  .regex(/^[a-z0-9_]+$/);
 export type UserId = z.infer<typeof UserIdSchema>;
+
+export const PhoneNumberSchema = z
+  .string()
+  .trim()
+  .regex(/^\+?[0-9]{8,15}$/);
 
 export const MessageTypeSchema = z.enum([
   "text",
@@ -75,6 +86,7 @@ export type UserCredential = z.infer<typeof UserCredentialSchema>;
 export const UserRecordSchema = z.object({
   id: UserIdSchema,
   displayName: z.string().min(1),
+  phoneNumber: PhoneNumberSchema,
   webauthnCredentials: z.array(UserCredentialSchema),
   identityPublicKey: z.string().min(10).optional(),
   identityKeyUpdatedAt: z.number().int().positive().optional()
@@ -82,7 +94,7 @@ export const UserRecordSchema = z.object({
 export type UserRecord = z.infer<typeof UserRecordSchema>;
 
 export const UserStoreSchema = z.object({
-  users: z.array(UserRecordSchema).length(2)
+  users: z.array(UserRecordSchema).max(5)
 });
 export type UserStore = z.infer<typeof UserStoreSchema>;
 
@@ -106,12 +118,18 @@ export const MediaStoreSchema = z.object({
 });
 export type MediaStore = z.infer<typeof MediaStoreSchema>;
 
+export const AuthRegisterChallengeRequestSchema = z.object({
+  username: UserIdSchema,
+  phoneNumber: PhoneNumberSchema
+});
+
 export const AuthChallengeRequestSchema = z.object({
   username: UserIdSchema
 });
 
 export const AuthVerifyRegisterRequestSchema = z.object({
   username: UserIdSchema,
+  phoneNumber: PhoneNumberSchema,
   response: z.unknown(),
   identityPublicKey: z.string().min(10).optional()
 });

@@ -3,23 +3,58 @@ import { describe, expect, it } from "vitest";
 import { ClientEventSchema, MessageStoreSchema, ServerEventSchema, UserStoreSchema } from "../src/schemas";
 
 describe("schemas", () => {
-  it("validates user store with two fixed users", () => {
+  it("validates user store with up to five users", () => {
     const parsed = UserStoreSchema.parse({
       users: [
         {
-          id: "userA",
-          displayName: "User A",
+          id: "harshal",
+          displayName: "Harshal",
+          phoneNumber: "+919900000001",
           webauthnCredentials: []
         },
         {
-          id: "userB",
-          displayName: "User B",
+          id: "purnima",
+          displayName: "Purnima",
+          phoneNumber: "+919900000002",
+          webauthnCredentials: []
+        },
+        {
+          id: "amit",
+          displayName: "Amit",
+          phoneNumber: "+919900000003",
+          webauthnCredentials: []
+        },
+        {
+          id: "riya",
+          displayName: "Riya",
+          phoneNumber: "+919900000004",
+          webauthnCredentials: []
+        },
+        {
+          id: "neha",
+          displayName: "Neha",
+          phoneNumber: "+919900000005",
           webauthnCredentials: []
         }
       ]
     });
 
-    expect(parsed.users).toHaveLength(2);
+    expect(parsed.users).toHaveLength(5);
+  });
+
+  it("rejects more than five users", () => {
+    expect(() =>
+      UserStoreSchema.parse({
+        users: [
+          { id: "u100", displayName: "U100", phoneNumber: "+911111111101", webauthnCredentials: [] },
+          { id: "u101", displayName: "U101", phoneNumber: "+911111111102", webauthnCredentials: [] },
+          { id: "u102", displayName: "U102", phoneNumber: "+911111111103", webauthnCredentials: [] },
+          { id: "u103", displayName: "U103", phoneNumber: "+911111111104", webauthnCredentials: [] },
+          { id: "u104", displayName: "U104", phoneNumber: "+911111111105", webauthnCredentials: [] },
+          { id: "u105", displayName: "U105", phoneNumber: "+911111111106", webauthnCredentials: [] }
+        ]
+      })
+    ).toThrow();
   });
 
   it("validates client and server websocket events", () => {
@@ -28,7 +63,7 @@ describe("schemas", () => {
       messageId: "evt-12345678",
       timestamp: Date.now(),
       type: "typing:start",
-      payload: { to: "userB" }
+      payload: { to: "purnima" }
     });
 
     const server = ServerEventSchema.parse({
@@ -49,8 +84,8 @@ describe("schemas", () => {
         {
           id: 1,
           clientMessageId: "msg-12345678",
-          sender: "userA",
-          recipient: "userB",
+          sender: "harshal",
+          recipient: "purnima",
           type: "text",
           encryptedPayload: {
             protocolVersion: 1,

@@ -29,63 +29,81 @@ function fromBuffer(bytes: Uint8Array): string {
 }
 
 export class WebAuthnService {
-  private registrationChallenges = new Map<UserId, string>();
+  private registrationChallenges = new Map<UserId, { challenge: string; phoneNumber: string }>();
 
   private loginChallenges = new Map<UserId, string>();
 
   constructor(private readonly usersService: UsersService) {}
 
-  async createRegistrationChallenge(userId: UserId) {
-    const user = await this.usersService.getUser(userId);
+  async createRegistrationChallenge(userId: UserId, phoneNumber: string) {
+    await this.usersService.validateRegistrationInput(userId, phoneNumber);
+    const existing = await this.usersService.findUser(userId);
+    const displayName = existing?.displayName ?? `${userId[0]!.toUpperCase()}${userId.slice(1)}`;
+
     const options = await generateRegistrationOptions({
       rpName: config.webauthn.rpName,
       rpID: config.webauthn.rpID,
-      userID: userIdBytes(user.id) as any,
-      userName: user.id,
-      userDisplayName: user.displayName,
+      userID: userIdBytes(userId) as any,
+      userName: userId,
+      userDisplayName: displayName,
       attestationType: "none",
       authenticatorSelection: {
         residentKey: "preferred",
         userVerification: "preferred"
       },
-      excludeCredentials: user.webauthnCredentials.map((credential) => ({
+      excludeCredentials: (existing?.webauthnCredentials ?? []).map((credential) => ({
         id: credential.id,
         transports: credential.transports as any
       }))
     });
 
-    this.registrationChallenges.set(userId, options.challenge);
+    this.registrationChallenges.set(userId, {
+      challenge: options.challenge,
+      phoneNumber
+    });
     return options;
   }
 
-  async verifyRegistration(userId: UserId, response: unknown) {
-    const expectedChallenge = this.registrationChallenges.get(userId);
-    if (!expectedChallenge) {
+  async verifyRegistration(userId: UserId, phoneNumber: string, response: unknown) {
+    const challengeState = this.registrationChallenges.get(userId);
+    if (!challengeState) {
       throw new Error("No registration challenge was issued");
     }
-
-    const verification = await verifyRegistrationResponse({
-      response: response as Parameters<typeof verifyRegistrationResponse>[0]["response"],
-      expectedChallenge,
-      expectedOrigin: config.webauthn.origin,
-      expectedRPID: config.webauthn.rpID,
-      requireUserVerification: false
-    });
-
-    if (verification.verified && verification.registrationInfo) {
-      const credential = verification.registrationInfo.credential;
-      await this.usersService.upsertCredential(userId, {
-        id: credential.id,
-        publicKey: fromBuffer(credential.publicKey),
-        counter: credential.counter,
-        transports: credential.transports,
-        credentialDeviceType: verification.registrationInfo.credentialDeviceType,
-        credentialBackedUp: verification.registrationInfo.credentialBackedUp
-      });
+    if (challengeState.phoneNumber !== phoneNumber) {
+      this.registrationChallenges.delete(userId);
+      throw new Error("Registration phone number did not match the issued challenge");
     }
 
-    this.registrationChallenges.delete(userId);
-    return verification;
+    try {
+      const verification = await verifyRegistrationResponse({
+        response: response as Parameters<typeof verifyRegistrationResponse>[0]["response"],
+        expectedChallenge: challengeState.challenge,
+        expectedOrigin: config.webauthn.origin,
+        expectedRPID: config.webauthn.rpID,
+        requireUserVerification: false
+      });
+
+      if (verification.verified && verification.registrationInfo) {
+        await this.usersService.ensureUser({
+          id: userId,
+          phoneNumber
+        });
+
+        const credential = verification.registrationInfo.credential;
+        await this.usersService.upsertCredential(userId, {
+          id: credential.id,
+          publicKey: fromBuffer(credential.publicKey),
+          counter: credential.counter,
+          transports: credential.transports,
+          credentialDeviceType: verification.registrationInfo.credentialDeviceType,
+          credentialBackedUp: verification.registrationInfo.credentialBackedUp
+        });
+      }
+
+      return verification;
+    } finally {
+      this.registrationChallenges.delete(userId);
+    }
   }
 
   async createLoginChallenge(userId: UserId) {

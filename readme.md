@@ -1,6 +1,6 @@
 ﻿# LoveChat v1
 
-Private two-user messenger built as a monorepo:
+Private messenger built as a monorepo:
 
 - `apps/web`: Next.js web client + Capacitor Android wrapper
 - `apps/server`: Fastify backend (WebAuthn, WebSocket, media APIs, LiveKit token API)
@@ -8,10 +8,11 @@ Private two-user messenger built as a monorepo:
 
 ## Implemented features
 
-- Fixed users: `userA` and `userB`
+- Multi-user directory (up to 5 users)
+- Register using `username + phone number`
 - Passkey auth (WebAuthn register/login)
 - Secure session cookie + short-lived WS token
-- Realtime 1:1 WebSocket chat
+- Realtime 1:1 WebSocket chat with selectable recipient
 - Encrypted message + media persistence in MongoDB
 - Offline sync (`GET /messages?after=...` + `sync:request`/`sync:batch`)
 - Encrypted media upload/download/ack + retention cleanup
@@ -33,7 +34,8 @@ npm install
 - Set MongoDB values:
   - `MONGODB_URI`
   - `MONGODB_DB_NAME`
-  - `MONGODB_DB_NAME`
+- Optional user cap:
+  - `MAX_USERS` (default `5`)
 - Update LiveKit values before call testing:
   - `LIVEKIT_URL`
   - `LIVEKIT_API_KEY`
@@ -48,8 +50,8 @@ npm run dev
 4. Open app:
 
 - Web: `http://localhost:3000/login`
-- Register passkeys once for `userA` and `userB`
-- Login from each side and start chat
+- Register users (username + phone) and create passkeys
+- Login and choose a contact from the chat header
 
 ## Scripts
 
@@ -91,6 +93,7 @@ If build fails with `JAVA_HOME is not set`, install JDK and set `JAVA_HOME`.
 - `POST /auth/verify/login`
 - `GET /auth/me`
 - `POST /auth/logout`
+- `GET /users`
 - `POST /keys/identity`
 - `GET /messages?after=...`
 - `POST /upload-media`

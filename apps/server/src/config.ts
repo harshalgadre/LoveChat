@@ -23,6 +23,7 @@ const EnvSchema = z.object({
   WEBAUTHN_RP_NAME: z.string().default("LoveChat"),
   WEBAUTHN_RP_ID: z.string().default("localhost"),
   WEBAUTHN_ORIGIN: z.string().url().default("http://localhost:3000"),
+  MAX_USERS: z.coerce.number().int().positive().max(20).default(5),
   MONGODB_URI: z.string().min(10),
   MONGODB_DB_NAME: z.string().min(1).default("lovechat"),
   MEDIA_RETENTION_MINUTES: z.coerce.number().int().positive().default(120),
@@ -57,6 +58,7 @@ export const config = {
     rpID: env.WEBAUTHN_RP_ID,
     origin: env.WEBAUTHN_ORIGIN
   },
+  maxUsers: env.MAX_USERS,
   mongo: {
     uri: env.MONGODB_URI,
     dbName: env.MONGODB_DB_NAME

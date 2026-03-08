@@ -42,8 +42,8 @@ describe("crypto", () => {
     });
 
     const metadata = {
-      sender: "userA",
-      recipient: "userB",
+      sender: "harshal",
+      recipient: "purnima",
       messageId: "msg-12345678",
       timestamp: Date.now(),
       type: "text"
@@ -79,8 +79,8 @@ describe("crypto", () => {
       session,
       "m1",
       {
-        sender: "userA",
-        recipient: "userB",
+        sender: "harshal",
+        recipient: "purnima",
         messageId: "msg-rotate-1",
         timestamp: 100,
         type: "text"

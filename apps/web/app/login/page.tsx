@@ -8,15 +8,26 @@ import type { UserId } from "@love-chat/shared";
 import { fetchSession, loginWithPasskey, registerPasskey, updateIdentityPublicKey } from "../../lib/auth";
 import { ensureIdentityKey } from "../../lib/cryptoSession";
 
-const USERS: UserId[] = ["userA", "userB"];
+const USERNAME_PATTERN = /^[a-z0-9_]{3,24}$/;
+const PHONE_PATTERN = /^\+?[0-9]{8,15}$/;
+
+function normalizeUsername(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function normalizePhone(value: string): string {
+  return value.trim().replace(/\s+/g, "");
+}
 
 export default function LoginPage() {
   const router = useRouter();
-  const [userId, setUserId] = useState<UserId>("userA");
+  const [username, setUsername] = useState("");
+  const [phoneNumber, setPhoneNumber] = useState("");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("Waiting for action");
 
-  const title = useMemo(() => `Sign in as ${userId}`, [userId]);
+  const normalizedUsername = useMemo(() => normalizeUsername(username), [username]);
+  const normalizedPhone = useMemo(() => normalizePhone(phoneNumber), [phoneNumber]);
 
   useEffect(() => {
     fetchSession()
@@ -28,22 +39,26 @@ export default function LoginPage() {
       });
   }, [router]);
 
-  useEffect(() => {
-    ensureIdentityKey(userId)
-      .then(() => {
-        setStatus("Identity key ready");
-      })
-      .catch((error) => {
-        setStatus(String(error));
-      });
-  }, [userId]);
+  const usernameValid = USERNAME_PATTERN.test(normalizedUsername);
+  const phoneValid = PHONE_PATTERN.test(normalizedPhone);
 
   async function runPasskeyFlow(action: "register" | "login") {
+    if (!usernameValid) {
+      setStatus("Username must be 3-24 chars: lowercase letters, digits, underscore.");
+      return;
+    }
+
+    if (action === "register" && !phoneValid) {
+      setStatus("Phone number must be 8-15 digits (optional + prefix).");
+      return;
+    }
+
     setBusy(true);
     try {
+      const userId = normalizedUsername as UserId;
       const identity = await ensureIdentityKey(userId);
       if (action === "register") {
-        await registerPasskey(userId, identity.publicKey);
+        await registerPasskey(userId, normalizedPhone, identity.publicKey);
         setStatus("Registration complete");
       } else {
         const session = await loginWithPasskey(userId);
@@ -66,32 +81,41 @@ export default function LoginPage() {
         <p style={{ letterSpacing: "0.2em", textTransform: "uppercase", color: "var(--muted)", marginTop: 0 }}>
           LoveChat
         </p>
-        <h1 style={{ marginTop: 0 }}>{title}</h1>
-        <p className="muted">Two fixed users only. Use passkey registration once, then login with biometrics.</p>
+        <h1 style={{ marginTop: 0 }}>Login / Register</h1>
+        <p className="muted" style={{ marginBottom: "1rem" }}>
+          Up to 5 users can register. Register with username + phone once, then login with passkey.
+        </p>
 
-        <label htmlFor="user" style={{ display: "block", marginTop: "1rem", marginBottom: "0.5rem" }}>
-          Account
+        <label htmlFor="username" style={{ display: "block", marginBottom: "0.4rem" }}>
+          Username
         </label>
-        <select
-          id="user"
-          value={userId}
-          onChange={(event) => {
-            setUserId(event.target.value as UserId);
-          }}
+        <input
+          id="username"
+          value={username}
+          onChange={(event) => setUsername(event.target.value)}
+          placeholder="harshal"
+          autoComplete="username"
           disabled={busy}
-        >
-          {USERS.map((entry) => (
-            <option value={entry} key={entry}>
-              {entry}
-            </option>
-          ))}
-        </select>
+        />
+        <small className="muted">Lowercase letters, digits, underscore. Example: `harshal_1`</small>
+
+        <label htmlFor="phone" style={{ display: "block", marginTop: "0.9rem", marginBottom: "0.4rem" }}>
+          Phone Number (for register)
+        </label>
+        <input
+          id="phone"
+          value={phoneNumber}
+          onChange={(event) => setPhoneNumber(event.target.value)}
+          placeholder="+919876543210"
+          autoComplete="tel"
+          disabled={busy}
+        />
 
         <div style={{ display: "flex", gap: "0.75rem", marginTop: "1rem", flexWrap: "wrap" }}>
-          <button onClick={() => runPasskeyFlow("register")} disabled={busy}>
+          <button onClick={() => void runPasskeyFlow("register")} disabled={busy}>
             Register Passkey
           </button>
-          <button className="secondary" onClick={() => runPasskeyFlow("login")} disabled={busy}>
+          <button className="secondary" onClick={() => void runPasskeyFlow("login")} disabled={busy}>
             Login
           </button>
         </div>
