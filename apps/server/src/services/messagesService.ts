@@ -1,6 +1,6 @@
-import type { EncryptedPayload, MessageRecord, MessageType, UserId } from "@love-chat/shared";
+﻿import type { EncryptedPayload, MessageRecord, MessageType, UserId } from "@love-chat/shared";
 
-import { messageStore } from "../storage/bootstrap";
+import { getCollections, nextCounterValue, parseMessageRecord } from "../storage/mongo";
 
 interface AppendMessageInput {
   clientMessageId: string;
@@ -14,30 +14,38 @@ interface AppendMessageInput {
 
 export class MessagesService {
   async appendMessage(input: AppendMessageInput): Promise<MessageRecord> {
-    return messageStore.update((current) => {
-      const nextId = current.messages.at(-1)?.id ? current.messages.at(-1)!.id + 1 : 1;
-      const record: MessageRecord = {
-        id: nextId,
-        clientMessageId: input.clientMessageId,
-        sender: input.sender,
-        recipient: input.recipient,
-        type: input.type,
-        encryptedPayload: input.encryptedPayload,
-        mediaId: input.mediaId,
-        createdAt: input.createdAt ?? Date.now()
-      };
+    const { messages } = await getCollections();
+    const nextId = await nextCounterValue("messages");
 
-      return {
-        next: {
-          messages: [...current.messages, record]
-        },
-        result: record
-      };
-    });
+    const record: MessageRecord = {
+      id: nextId,
+      clientMessageId: input.clientMessageId,
+      sender: input.sender,
+      recipient: input.recipient,
+      type: input.type,
+      encryptedPayload: input.encryptedPayload,
+      mediaId: input.mediaId,
+      createdAt: input.createdAt ?? Date.now()
+    };
+
+    await messages.insertOne(record);
+    return parseMessageRecord(record);
   }
 
   async getMessagesForUser(userId: UserId, afterId: number): Promise<MessageRecord[]> {
-    const { messages } = await messageStore.read();
-    return messages.filter((message) => message.id > afterId && (message.sender === userId || message.recipient === userId));
+    const { messages } = await getCollections();
+    const docs = await messages
+      .find(
+        {
+          id: { $gt: afterId },
+          $or: [{ sender: userId }, { recipient: userId }]
+        },
+        {
+          sort: { id: 1 }
+        }
+      )
+      .toArray();
+
+    return docs.map((doc) => parseMessageRecord(doc));
   }
 }

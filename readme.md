@@ -12,7 +12,7 @@ Private two-user messenger built as a monorepo:
 - Passkey auth (WebAuthn register/login)
 - Secure session cookie + short-lived WS token
 - Realtime 1:1 WebSocket chat
-- Encrypted message persistence (`apps/server/data/chat.json`)
+- Encrypted message + media persistence in MongoDB
 - Offline sync (`GET /messages?after=...` + `sync:request`/`sync:batch`)
 - Encrypted media upload/download/ack + retention cleanup
 - Voice notes (MediaRecorder -> encrypted media flow)
@@ -30,6 +30,10 @@ npm install
 2. Configure env:
 
 - `.env` already exists for local dev defaults.
+- Set MongoDB values:
+  - `MONGODB_URI`
+  - `MONGODB_DB_NAME`
+  - `MONGODB_DB_NAME`
 - Update LiveKit values before call testing:
   - `LIVEKIT_URL`
   - `LIVEKIT_API_KEY`
@@ -99,4 +103,5 @@ If build fails with `JAVA_HOME is not set`, install JDK and set `JAVA_HOME`.
 
 - WebAuthn requires proper origin/rp settings for non-local deployments.
 - Server stores encrypted message payloads; plaintext is not persisted.
-- Media files are deleted after both users ACK or when retention expires.
+- Media payloads are stored in MongoDB and deleted after both users ACK or when retention expires.
+- Uploads are limited to 12MB per file (MongoDB document size safety).

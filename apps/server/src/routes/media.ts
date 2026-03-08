@@ -1,12 +1,8 @@
-import fs from "node:fs/promises";
-import path from "node:path";
-
-import type { FastifyInstance } from "fastify";
+﻿import type { FastifyInstance } from "fastify";
 
 import { EncryptedPayloadSchema, UploadMediaBodySchema } from "@love-chat/shared";
 
 import { requireUser } from "../auth/requestAuth";
-import { config } from "../config";
 import { MediaService } from "../services/mediaService";
 
 interface MediaRouteDeps {
@@ -61,11 +57,6 @@ export async function registerMediaRoutes(app: FastifyInstance, deps: MediaRoute
       return reply.status(400).send({ error: "INVALID_BODY", details: bodyParsed.error.flatten() });
     }
 
-    const mediaFileName = `${crypto.randomUUID()}.bin`;
-    const storagePath = mediaFileName;
-    const absolutePath = path.join(config.storage.mediaDir, storagePath);
-    await fs.writeFile(absolutePath, fileBuffer);
-
     const mediaRecord = await deps.mediaService.createMediaRecord({
       sender: userId,
       recipient: bodyParsed.data.recipient,
@@ -73,7 +64,7 @@ export async function registerMediaRoutes(app: FastifyInstance, deps: MediaRoute
       fileName: bodyParsed.data.fileName,
       byteLength: fileBuffer.byteLength,
       encryptedPayload: bodyParsed.data.encryptedPayload,
-      storagePath
+      encryptedBytes: fileBuffer
     });
 
     return reply.send({ mediaId: mediaRecord.id, size: mediaRecord.byteLength });
@@ -86,15 +77,14 @@ export async function registerMediaRoutes(app: FastifyInstance, deps: MediaRoute
     }
 
     const mediaId = (request.params as { id: string }).id;
-    const media = await deps.mediaService.getMediaForUser(mediaId, userId);
-    if (!media) {
+    const response = await deps.mediaService.getMediaBlobForUser(mediaId, userId);
+    if (!response) {
       return reply.status(404).send({ error: "MEDIA_NOT_FOUND" });
     }
 
-    const file = await fs.readFile(path.join(config.storage.mediaDir, media.storagePath));
     reply.header("Content-Type", "application/octet-stream");
-    reply.header("X-LoveChat-FileName", media.fileName);
-    return reply.send(file);
+    reply.header("X-LoveChat-FileName", response.media.fileName);
+    return reply.send(Buffer.from(response.bytes));
   });
 
   app.post("/media/:id/ack", async (request, reply) => {

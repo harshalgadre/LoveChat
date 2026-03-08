@@ -1,7 +1,7 @@
-import path from "node:path";
-
 import dotenv from "dotenv";
 import { z } from "zod";
+
+import path from "node:path";
 
 dotenv.config({ path: path.resolve(process.cwd(), ".env") });
 if (!process.env.SESSION_JWT_SECRET || !process.env.WS_TOKEN_SECRET) {
@@ -22,8 +22,8 @@ const EnvSchema = z.object({
   WEBAUTHN_RP_NAME: z.string().default("LoveChat"),
   WEBAUTHN_RP_ID: z.string().default("localhost"),
   WEBAUTHN_ORIGIN: z.string().url().default("http://localhost:3000"),
-  DATA_DIR: z.string().default("./data"),
-  MEDIA_DIR: z.string().default("./media"),
+  MONGODB_URI: z.string().min(10),
+  MONGODB_DB_NAME: z.string().min(1).default("lovechat"),
   MEDIA_RETENTION_MINUTES: z.coerce.number().int().positive().default(120),
   LIVEKIT_URL: z.string().default(""),
   LIVEKIT_API_KEY: z.string().default(""),
@@ -55,9 +55,11 @@ export const config = {
     rpID: env.WEBAUTHN_RP_ID,
     origin: env.WEBAUTHN_ORIGIN
   },
-  storage: {
-    dataDir: path.resolve(process.cwd(), env.DATA_DIR),
-    mediaDir: path.resolve(process.cwd(), env.MEDIA_DIR),
+  mongo: {
+    uri: env.MONGODB_URI,
+    dbName: env.MONGODB_DB_NAME
+  },
+  retention: {
     mediaRetentionMs: env.MEDIA_RETENTION_MINUTES * 60_000
   },
   livekit: {

@@ -1,96 +1,85 @@
-import type { UserCredential, UserId, UserRecord } from "@love-chat/shared";
+﻿import type { UserCredential, UserId, UserRecord } from "@love-chat/shared";
 
-import { userStore } from "../storage/bootstrap";
+import { getCollections, parseUserRecord } from "../storage/mongo";
 
 export class UsersService {
   async listUsers(): Promise<UserRecord[]> {
-    const store = await userStore.read();
-    return store.users;
+    const { users } = await getCollections();
+    const docs = await users.find({}, { sort: { id: 1 } }).toArray();
+    return docs.map((doc) => parseUserRecord(doc));
   }
 
   async getUser(userId: UserId): Promise<UserRecord> {
-    const users = await this.listUsers();
-    const user = users.find((entry) => entry.id === userId);
-    if (!user) {
+    const { users } = await getCollections();
+    const doc = await users.findOne({ id: userId });
+    if (!doc) {
       throw new Error(`Unknown user ${userId}`);
     }
-    return user;
+
+    return parseUserRecord(doc);
   }
 
   async getPeerUser(userId: UserId): Promise<UserRecord> {
-    const users = await this.listUsers();
-    const peer = users.find((entry) => entry.id !== userId);
-    if (!peer) {
+    const { users } = await getCollections();
+    const doc = await users.findOne({ id: { $ne: userId } });
+    if (!doc) {
       throw new Error("Peer user not found");
     }
-    return peer;
+
+    return parseUserRecord(doc);
   }
 
   async upsertCredential(userId: UserId, credential: UserCredential): Promise<void> {
-    await userStore.update((current) => {
-      const nextUsers = current.users.map((entry) => {
-        if (entry.id !== userId) {
-          return entry;
+    const current = await this.getUser(userId);
+    const nextCredentials = [
+      ...current.webauthnCredentials.filter((item) => item.id !== credential.id),
+      credential
+    ];
+
+    const { users } = await getCollections();
+    await users.updateOne(
+      { id: userId },
+      {
+        $set: {
+          webauthnCredentials: nextCredentials
         }
-
-        const existing = entry.webauthnCredentials.filter((item) => item.id !== credential.id);
-        return {
-          ...entry,
-          webauthnCredentials: [...existing, credential]
-        };
-      });
-
-      return {
-        next: { users: nextUsers },
-        result: undefined
-      };
-    });
+      }
+    );
   }
 
   async updateCredentialCounter(userId: UserId, credentialId: string, counter: number): Promise<void> {
-    await userStore.update((current) => {
-      const nextUsers = current.users.map((entry) => {
-        if (entry.id !== userId) {
-          return entry;
+    const current = await this.getUser(userId);
+    const nextCredentials = current.webauthnCredentials.map((credential) =>
+      credential.id === credentialId
+        ? {
+            ...credential,
+            counter
+          }
+        : credential
+    );
+
+    const { users } = await getCollections();
+    await users.updateOne(
+      { id: userId },
+      {
+        $set: {
+          webauthnCredentials: nextCredentials
         }
-
-        return {
-          ...entry,
-          webauthnCredentials: entry.webauthnCredentials.map((credential) =>
-            credential.id === credentialId
-              ? {
-                  ...credential,
-                  counter
-                }
-              : credential
-          )
-        };
-      });
-
-      return {
-        next: { users: nextUsers },
-        result: undefined
-      };
-    });
+      }
+    );
   }
 
   async setIdentityPublicKey(userId: UserId, publicKey: string): Promise<void> {
-    await userStore.update((current) => {
-      const nextUsers = current.users.map((entry) =>
-        entry.id === userId
-          ? {
-              ...entry,
-              identityPublicKey: publicKey,
-              identityKeyUpdatedAt: Date.now()
-            }
-          : entry
-      );
-
-      return {
-        next: { users: nextUsers },
-        result: undefined
-      };
-    });
+    const { users } = await getCollections();
+    await users.updateOne(
+      { id: userId },
+      {
+        $set: {
+          identityPublicKey: publicKey,
+          identityKeyUpdatedAt: Date.now()
+        }
+      }
+    );
   }
 
   async getIdentityPublicKey(userId: UserId): Promise<string | null> {

@@ -1,10 +1,9 @@
-import fs from "node:fs/promises";
-import path from "node:path";
+﻿import { Binary } from "mongodb";
 
 import type { EncryptedPayload, MediaRecord, UserId } from "@love-chat/shared";
 
 import { config } from "../config";
-import { mediaStore } from "../storage/bootstrap";
+import { getCollections, parseMediaRecord } from "../storage/mongo";
 
 interface CreateMediaRecordInput {
   sender: UserId;
@@ -13,102 +12,114 @@ interface CreateMediaRecordInput {
   fileName: string;
   byteLength: number;
   encryptedPayload: EncryptedPayload;
-  storagePath: string;
+  encryptedBytes: Uint8Array;
+  storagePath?: string;
+}
+
+interface MediaBlobResponse {
+  media: MediaRecord;
+  bytes: Uint8Array;
 }
 
 export class MediaService {
   async createMediaRecord(input: CreateMediaRecordInput): Promise<MediaRecord> {
-    return mediaStore.update((current) => {
-      const now = Date.now();
-      const record: MediaRecord = {
-        id: crypto.randomUUID(),
-        sender: input.sender,
-        recipient: input.recipient,
-        mimeType: input.mimeType,
-        fileName: input.fileName,
-        byteLength: input.byteLength,
-        fileEncryptionPayload: input.encryptedPayload,
-        storagePath: input.storagePath,
-        createdAt: now,
-        expiresAt: now + config.storage.mediaRetentionMs,
-        ackedBy: []
-      };
+    const { media, mediaBlobs } = await getCollections();
+    const now = Date.now();
+    const storageKey = input.storagePath ?? crypto.randomUUID();
 
-      return {
-        next: {
-          media: [...current.media, record]
-        },
-        result: record
-      };
+    const record: MediaRecord = {
+      id: crypto.randomUUID(),
+      sender: input.sender,
+      recipient: input.recipient,
+      mimeType: input.mimeType,
+      fileName: input.fileName,
+      byteLength: input.byteLength,
+      fileEncryptionPayload: input.encryptedPayload,
+      storagePath: storageKey,
+      createdAt: now,
+      expiresAt: now + config.retention.mediaRetentionMs,
+      ackedBy: []
+    };
+
+    await media.insertOne(record);
+    await mediaBlobs.insertOne({
+      _id: storageKey,
+      data: new Binary(Buffer.from(input.encryptedBytes)),
+      createdAt: now,
+      expiresAt: record.expiresAt
     });
+
+    return parseMediaRecord(record);
   }
 
   async getMediaForUser(mediaId: string, userId: UserId): Promise<MediaRecord | null> {
-    const { media } = await mediaStore.read();
-    const record = media.find((entry) => entry.id === mediaId);
+    const { media } = await getCollections();
+    const doc = await media.findOne({
+      id: mediaId,
+      $or: [{ sender: userId }, { recipient: userId }]
+    });
+
+    return doc ? parseMediaRecord(doc) : null;
+  }
+
+  async getMediaBlobForUser(mediaId: string, userId: UserId): Promise<MediaBlobResponse | null> {
+    const { mediaBlobs } = await getCollections();
+    const record = await this.getMediaForUser(mediaId, userId);
     if (!record) {
       return null;
     }
-    if (record.sender !== userId && record.recipient !== userId) {
+
+    const blob = await mediaBlobs.findOne({ _id: record.storagePath });
+    if (!blob) {
       return null;
     }
-    return record;
+
+    return {
+      media: record,
+      bytes: this.binaryToBytes(blob.data)
+    };
   }
 
   async ackMedia(mediaId: string, userId: UserId): Promise<MediaRecord | null> {
-    return mediaStore.update(async (current) => {
-      const index = current.media.findIndex((entry) => entry.id === mediaId);
-      if (index < 0) {
-        return { next: current, result: null };
-      }
+    const { media, mediaBlobs } = await getCollections();
+    const existing = await media.findOne({ id: mediaId });
+    if (!existing) {
+      return null;
+    }
 
-      const record = current.media[index];
-      const ackedBy = Array.from(new Set([...record.ackedBy, userId]));
-      const updated: MediaRecord = { ...record, ackedBy };
+    await media.updateOne({ id: mediaId }, { $addToSet: { ackedBy: userId } });
+    const updated = await media.findOne({ id: mediaId });
+    if (!updated) {
+      return null;
+    }
 
-      let nextMedia = [...current.media];
-      nextMedia[index] = updated;
+    const parsed = parseMediaRecord(updated);
+    const bothAcked = parsed.ackedBy.includes(parsed.sender) && parsed.ackedBy.includes(parsed.recipient);
+    if (bothAcked) {
+      await media.deleteOne({ id: mediaId });
+      await mediaBlobs.deleteOne({ _id: parsed.storagePath });
+    }
 
-      const bothAcked = updated.ackedBy.includes(updated.sender) && updated.ackedBy.includes(updated.recipient);
-      if (bothAcked) {
-        nextMedia = nextMedia.filter((entry) => entry.id !== mediaId);
-        await this.safeDeleteFile(path.join(config.storage.mediaDir, updated.storagePath));
-        return {
-          next: { media: nextMedia },
-          result: updated
-        };
-      }
-
-      return {
-        next: { media: nextMedia },
-        result: updated
-      };
-    });
+    return parsed;
   }
 
   async cleanupExpiredMedia(now = Date.now()): Promise<number> {
-    return mediaStore.update(async (current) => {
-      const expired = current.media.filter((entry) => entry.expiresAt <= now);
-      if (!expired.length) {
-        return { next: current, result: 0 };
-      }
+    const { media, mediaBlobs } = await getCollections();
+    const expired = await media.find({ expiresAt: { $lte: now } }).toArray();
+    if (!expired.length) {
+      return 0;
+    }
 
-      await Promise.all(expired.map((entry) => this.safeDeleteFile(path.join(config.storage.mediaDir, entry.storagePath))));
+    const mediaIds = expired.map((item) => item.id);
+    const blobIds = expired.map((item) => item.storagePath);
 
-      return {
-        next: {
-          media: current.media.filter((entry) => entry.expiresAt > now)
-        },
-        result: expired.length
-      };
-    });
+    await media.deleteMany({ id: { $in: mediaIds } });
+    await mediaBlobs.deleteMany({ _id: { $in: blobIds } });
+
+    return expired.length;
   }
 
-  private async safeDeleteFile(filePath: string): Promise<void> {
-    try {
-      await fs.unlink(filePath);
-    } catch {
-      // Ignore missing files during retention cleanup.
-    }
+  private binaryToBytes(value: Binary): Uint8Array {
+    return new Uint8Array(value.buffer);
   }
 }

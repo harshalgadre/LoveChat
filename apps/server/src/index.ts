@@ -17,10 +17,10 @@ import { ChatGateway } from "./services/chatGateway";
 import { MediaService } from "./services/mediaService";
 import { MessagesService } from "./services/messagesService";
 import { UsersService } from "./services/usersService";
-import { ensureStorageReady } from "./storage/bootstrap";
+import { closeMongo, ensureMongoReady } from "./storage/mongo";
 
 export async function createServer() {
-  await ensureStorageReady();
+  await ensureMongoReady();
 
   const app = Fastify({
     logger: true
@@ -33,7 +33,8 @@ export async function createServer() {
   await app.register(cookie);
   await app.register(multipart, {
     limits: {
-      fileSize: 30 * 1024 * 1024
+      // Mongo document size max is 16MB; keep upload comfortably below it.
+      fileSize: 12 * 1024 * 1024
     }
   });
   await app.register(websocket);
@@ -58,6 +59,7 @@ export async function createServer() {
 
   app.addHook("onClose", async () => {
     clearInterval(cleanup);
+    await closeMongo();
   });
 
   return app;
