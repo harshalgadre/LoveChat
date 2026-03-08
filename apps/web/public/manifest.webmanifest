@@ -1,0 +1,19 @@
+﻿{
+  "name": "LoveChat",
+  "short_name": "LoveChat",
+  "description": "Private 2-person encrypted messenger",
+  "start_url": "/login",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#041016",
+  "theme_color": "#041016",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
