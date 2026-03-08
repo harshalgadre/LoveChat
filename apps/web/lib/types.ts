@@ -28,6 +28,7 @@ export interface AuthSession {
   userId: UserId;
   peerId: UserId;
   wsToken: string;
+  sessionToken?: string;
   selfIdentityPublicKey: string | null;
   peerIdentityPublicKey: string | null;
 }

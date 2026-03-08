@@ -2,6 +2,7 @@ import type { EncryptedPayload, MessageType, UserId } from "@love-chat/shared";
 
 import { serverUrl } from "./config";
 import { jsonRequest, uploadRequest } from "./api";
+import { getSessionToken } from "./sessionToken";
 
 export async function uploadEncryptedMedia(input: {
   recipient: UserId;
@@ -34,9 +35,16 @@ export async function uploadEncryptedMedia(input: {
 }
 
 export async function downloadEncryptedMedia(mediaId: string): Promise<Uint8Array> {
+  const sessionToken = getSessionToken();
+  const headers: Record<string, string> = {};
+  if (sessionToken) {
+    headers.Authorization = `Bearer ${sessionToken}`;
+  }
+
   const response = await fetch(serverUrl(`/media/${mediaId}`), {
     credentials: "include",
     method: "GET",
+    headers,
     cache: "no-store"
   });
 

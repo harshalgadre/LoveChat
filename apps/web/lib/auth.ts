@@ -3,6 +3,7 @@ import { startAuthentication, startRegistration } from "@simplewebauthn/browser"
 import type { UserId } from "@love-chat/shared";
 
 import { jsonRequest } from "./api";
+import { clearSessionToken, setSessionToken } from "./sessionToken";
 import type { AuthSession } from "./types";
 
 interface ChallengePayload {
@@ -23,7 +24,7 @@ export async function registerPasskey(userId: UserId, identityPublicKey: string)
 
   const credential = await startRegistration({ optionsJSON: options });
 
-  return jsonRequest<AuthSession>("/auth/verify/register", {
+  const session = await jsonRequest<AuthSession>("/auth/verify/register", {
     method: "POST",
     body: {
       username: userId,
@@ -31,6 +32,10 @@ export async function registerPasskey(userId: UserId, identityPublicKey: string)
       identityPublicKey
     } satisfies VerifyPayload
   });
+  if (session.sessionToken) {
+    setSessionToken(session.sessionToken);
+  }
+  return session;
 }
 
 export async function loginWithPasskey(userId: UserId) {
@@ -41,17 +46,25 @@ export async function loginWithPasskey(userId: UserId) {
 
   const assertion = await startAuthentication({ optionsJSON: options });
 
-  return jsonRequest<AuthSession>("/auth/verify/login", {
+  const session = await jsonRequest<AuthSession>("/auth/verify/login", {
     method: "POST",
     body: {
       username: userId,
       response: assertion
     } satisfies VerifyPayload
   });
+  if (session.sessionToken) {
+    setSessionToken(session.sessionToken);
+  }
+  return session;
 }
 
 export async function fetchSession(): Promise<AuthSession> {
-  return jsonRequest<AuthSession>("/auth/me");
+  const session = await jsonRequest<AuthSession>("/auth/me");
+  if (session.sessionToken) {
+    setSessionToken(session.sessionToken);
+  }
+  return session;
 }
 
 export async function updateIdentityPublicKey(publicKey: string): Promise<void> {
@@ -62,7 +75,11 @@ export async function updateIdentityPublicKey(publicKey: string): Promise<void> 
 }
 
 export async function logout(): Promise<void> {
-  await jsonRequest<{ ok: boolean }>("/auth/logout", {
-    method: "POST"
-  });
+  try {
+    await jsonRequest<{ ok: boolean }>("/auth/logout", {
+      method: "POST"
+    });
+  } finally {
+    clearSessionToken();
+  }
 }

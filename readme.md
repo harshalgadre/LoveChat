@@ -102,6 +102,7 @@ If build fails with `JAVA_HOME is not set`, install JDK and set `JAVA_HOME`.
 ## Notes
 
 - WebAuthn requires proper origin/rp settings for non-local deployments.
+- For frontend and backend on different domains, use `SESSION_COOKIE_SAMESITE=none` with HTTPS.
 - Server stores encrypted message payloads; plaintext is not persisted.
 - Media payloads are stored in MongoDB and deleted after both users ACK or when retention expires.
 - Uploads are limited to 12MB per file (MongoDB document size safety).

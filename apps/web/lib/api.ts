@@ -1,4 +1,5 @@
 import { serverUrl } from "./config";
+import { getSessionToken } from "./sessionToken";
 
 interface JsonRequestOptions {
   method?: "GET" | "POST" | "PUT" | "DELETE";
@@ -6,12 +7,18 @@ interface JsonRequestOptions {
 }
 
 export async function jsonRequest<T>(path: string, options: JsonRequestOptions = {}): Promise<T> {
+  const sessionToken = getSessionToken();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json"
+  };
+  if (sessionToken) {
+    headers.Authorization = `Bearer ${sessionToken}`;
+  }
+
   const response = await fetch(serverUrl(path), {
     method: options.method ?? "GET",
     credentials: "include",
-    headers: {
-      "Content-Type": "application/json"
-    },
+    headers,
     body: options.body ? JSON.stringify(options.body) : undefined,
     cache: "no-store"
   });
@@ -26,9 +33,16 @@ export async function jsonRequest<T>(path: string, options: JsonRequestOptions =
 }
 
 export async function uploadRequest<T>(path: string, formData: FormData): Promise<T> {
+  const sessionToken = getSessionToken();
+  const headers: Record<string, string> = {};
+  if (sessionToken) {
+    headers.Authorization = `Bearer ${sessionToken}`;
+  }
+
   const response = await fetch(serverUrl(path), {
     method: "POST",
     credentials: "include",
+    headers,
     body: formData,
     cache: "no-store"
   });

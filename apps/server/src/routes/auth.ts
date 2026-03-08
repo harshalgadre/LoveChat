@@ -52,7 +52,7 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDe
     reply.setCookie(getCookieName(), sessionToken, {
       path: "/",
       httpOnly: true,
-      sameSite: "strict",
+      sameSite: config.sessionCookieSameSite,
       secure: config.isProd,
       maxAge: config.sessionTtlSeconds
     });
@@ -60,7 +60,9 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDe
     return reply.send({
       verified: true,
       userId: parsed.data.username,
+      sessionToken,
       wsToken,
+      peerId: peer.id,
       peerIdentityPublicKey: peer.identityPublicKey ?? null,
       selfIdentityPublicKey: self.identityPublicKey ?? null
     });
@@ -95,7 +97,7 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDe
     reply.setCookie(getCookieName(), sessionToken, {
       path: "/",
       httpOnly: true,
-      sameSite: "strict",
+      sameSite: config.sessionCookieSameSite,
       secure: config.isProd,
       maxAge: config.sessionTtlSeconds
     });
@@ -103,7 +105,9 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDe
     return reply.send({
       verified: true,
       userId: parsed.data.username,
+      sessionToken,
       wsToken,
+      peerId: peer.id,
       peerIdentityPublicKey: peer.identityPublicKey ?? null,
       selfIdentityPublicKey: self.identityPublicKey ?? null
     });
@@ -117,10 +121,20 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDe
 
     const peer = await deps.usersService.getPeerUser(userId);
     const self = await deps.usersService.getUser(userId);
+    const sessionToken = await createSessionToken(userId);
     const wsToken = await createWsToken(userId);
+
+    reply.setCookie(getCookieName(), sessionToken, {
+      path: "/",
+      httpOnly: true,
+      sameSite: config.sessionCookieSameSite,
+      secure: config.isProd,
+      maxAge: config.sessionTtlSeconds
+    });
 
     return reply.send({
       userId,
+      sessionToken,
       peerId: peer.id,
       peerIdentityPublicKey: peer.identityPublicKey ?? null,
       selfIdentityPublicKey: self.identityPublicKey ?? null,
