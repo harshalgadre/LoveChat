@@ -1,10 +1,22 @@
-import { Room, RoomEvent } from "livekit-client";
+import { type RemoteParticipant, type RemoteTrack, type RemoteTrackPublication, Room, RoomEvent } from "livekit-client";
 
 import { jsonRequest } from "./api";
 
 export interface ActiveCall {
   room: Room;
   roomName: string;
+  livekitUrl: string;
+  meetUrl: string;
+}
+
+function buildMeetUrl(livekitUrl: string, token: string): string {
+  const params = new URLSearchParams({
+    tab: "custom",
+    url: livekitUrl,
+    liveKitUrl: livekitUrl,
+    token
+  });
+  return `https://meet.livekit.io/?${params.toString()}`;
 }
 
 export async function createLiveKitConnection(
@@ -28,31 +40,103 @@ export async function createLiveKitConnection(
   await room.localParticipant.setMicrophoneEnabled(true);
   if (callType === "video") {
     await room.localParticipant.setCameraEnabled(true);
+  } else {
+    await room.localParticipant.setCameraEnabled(false);
   }
 
   return {
     room,
-    roomName
+    roomName,
+    livekitUrl: tokenPayload.livekitUrl,
+    meetUrl: buildMeetUrl(tokenPayload.livekitUrl, tokenPayload.token)
   };
 }
 
 export function bindRemoteTrack(
   room: Room,
-  onTrack: (element: HTMLMediaElement) => void
+  onTrack: (trackId: string, kind: "audio" | "video", element: HTMLMediaElement) => void,
+  onTrackRemoved?: (trackId: string, kind: "audio" | "video") => void
 ): () => void {
-  const handler = (_track: any, _publication: any, participant: any) => {
-    const tracks = participant.getTrackPublications();
-    for (const pub of tracks) {
-      if (pub.track) {
-        const element = pub.track.attach() as HTMLMediaElement;
-        onTrack(element);
+  const attachedElements = new Map<
+    string,
+    {
+      kind: "audio" | "video";
+      element: HTMLMediaElement;
+      track: RemoteTrack;
+    }
+  >();
+
+  const trackKey = (publication: RemoteTrackPublication, participant: RemoteParticipant, track: RemoteTrack): string =>
+    publication.trackSid ?? `${participant.identity}-${publication.source}-${track.sid}`;
+
+  const handleTrackSubscribed = (
+    track: RemoteTrack,
+    publication: RemoteTrackPublication,
+    participant: RemoteParticipant
+  ) => {
+    if (track.kind !== "audio" && track.kind !== "video") {
+      return;
+    }
+
+    const key = trackKey(publication, participant, track);
+    if (attachedElements.has(key)) {
+      return;
+    }
+
+    const element = track.attach() as HTMLMediaElement;
+    element.autoplay = true;
+    element.setAttribute("playsinline", "true");
+    attachedElements.set(key, {
+      kind: track.kind,
+      element,
+      track
+    });
+    onTrack(key, track.kind, element);
+  };
+
+  const handleTrackUnsubscribed = (
+    track: RemoteTrack,
+    publication: RemoteTrackPublication,
+    participant: RemoteParticipant
+  ) => {
+    const key = trackKey(publication, participant, track);
+    const existing = attachedElements.get(key);
+    if (!existing) {
+      return;
+    }
+
+    existing.track.detach(existing.element);
+    existing.element.remove();
+    attachedElements.delete(key);
+    onTrackRemoved?.(key, existing.kind);
+  };
+
+  const attachExistingTracks = (participant: RemoteParticipant) => {
+    for (const publication of participant.getTrackPublications().values()) {
+      const remotePublication = publication as RemoteTrackPublication;
+      if (remotePublication.track) {
+        handleTrackSubscribed(remotePublication.track as RemoteTrack, remotePublication, participant);
       }
     }
   };
 
-  room.on(RoomEvent.TrackSubscribed, handler);
+  room.on(RoomEvent.TrackSubscribed, handleTrackSubscribed);
+  room.on(RoomEvent.TrackUnsubscribed, handleTrackUnsubscribed);
+
+  for (const participant of room.remoteParticipants.values()) {
+    attachExistingTracks(participant);
+  }
+
   return () => {
-    room.off(RoomEvent.TrackSubscribed, handler);
+    room.off(RoomEvent.TrackSubscribed, handleTrackSubscribed);
+    room.off(RoomEvent.TrackUnsubscribed, handleTrackUnsubscribed);
+
+    for (const [trackId, entry] of attachedElements.entries()) {
+      entry.track.detach(entry.element);
+      entry.element.remove();
+      onTrackRemoved?.(trackId, entry.kind);
+    }
+    attachedElements.clear();
   };
 }
 

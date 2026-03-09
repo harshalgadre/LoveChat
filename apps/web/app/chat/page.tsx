@@ -8,7 +8,7 @@ import { useRouter } from "next/navigation";
 import { jsonRequest } from "../../lib/api";
 import { fetchSession, logout, updateIdentityPublicKey, updateProfile } from "../../lib/auth";
 import { fileToBytes } from "../../lib/bytes";
-import { createLiveKitConnection, endLiveKitConnection, type ActiveCall } from "../../lib/calls";
+import { bindRemoteTrack, createLiveKitConnection, endLiveKitConnection, type ActiveCall } from "../../lib/calls";
 import {
   decryptBinaryPayload,
   decryptTextPayload,
@@ -55,6 +55,11 @@ type MediaPreview = {
   objectUrl: string;
   mimeType: string;
 };
+
+type ComposeActionMode = "idle" | "armed" | "voice" | "video";
+
+const HOLD_TO_RECORD_MS = 260;
+const DRAG_TO_VIDEO_THRESHOLD = 52;
 
 function formatTime(value: number): string {
   return new Date(value).toLocaleTimeString([], {
@@ -165,9 +170,15 @@ export default function ChatPage() {
   const [nicknames, setNicknamesState] = useState<Record<string, string>>({});
   const [nicknameDraft, setNicknameDraft] = useState("");
   const [dashboardTab, setDashboardTab] = useState<"main" | "directory" | "settings">("main");
+  const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
   const [profileDisplayName, setProfileDisplayName] = useState("");
   const [profileAvatarUrl, setProfileAvatarUrl] = useState("");
   const [profileSaving, setProfileSaving] = useState(false);
+  const [composeActionMode, setComposeActionMode] = useState<ComposeActionMode>("idle");
+  const [composeDragOffset, setComposeDragOffset] = useState(0);
+  const [remoteVideoTracks, setRemoteVideoTracks] = useState(0);
+  const [activeMeetUrl, setActiveMeetUrl] = useState<string | null>(null);
+  const [callError, setCallError] = useState<string | null>(null);
 
   const authRef = useRef<AuthSession | null>(null);
   const selectedPeerRef = useRef<UserId | null>(null);
@@ -181,13 +192,24 @@ export default function ChatPage() {
   const audioRecorderRef = useRef<MediaRecorder | null>(null);
   const videoRecorderRef = useRef<MediaRecorder | null>(null);
   const videoPreviewRef = useRef<HTMLVideoElement | null>(null);
+  const draftInputRef = useRef<HTMLTextAreaElement | null>(null);
   const videoStreamRef = useRef<MediaStream | null>(null);
   const callRef = useRef<ActiveCall | null>(null);
+  const remoteTrackCleanupRef = useRef<(() => void) | null>(null);
+  const remoteTracksHostRef = useRef<HTMLDivElement | null>(null);
   const mediaPreviewsRef = useRef<Record<string, MediaPreview>>({});
   const threadRef = useRef<HTMLDivElement | null>(null);
   const activeCallRef = useRef<CallState | null>(null);
   const nicknamesRef = useRef<Record<string, string>>({});
   const conversationLoadRef = useRef(0);
+  const audioUploadBehaviorRef = useRef<"send" | "discard">("send");
+  const videoUploadBehaviorRef = useRef<"send" | "discard">("send");
+  const composePointerIdRef = useRef<number | null>(null);
+  const composePointerStartYRef = useRef<number | null>(null);
+  const composeHoldTimerRef = useRef<number | null>(null);
+  const composeWantsVideoRef = useRef(false);
+  const suppressComposeClickRef = useRef(false);
+  const composeActionModeRef = useRef<ComposeActionMode>("idle");
 
   const peers = useMemo(() => {
     if (!auth) {
@@ -252,6 +274,52 @@ export default function ChatPage() {
     });
   }, []);
 
+  const clearComposeHoldTimer = useCallback(() => {
+    if (composeHoldTimerRef.current !== null) {
+      window.clearTimeout(composeHoldTimerRef.current);
+      composeHoldTimerRef.current = null;
+    }
+  }, []);
+
+  const bindCallMediaTracks = useCallback((call: ActiveCall) => {
+    remoteTrackCleanupRef.current?.();
+    remoteTrackCleanupRef.current = null;
+
+    const host = remoteTracksHostRef.current;
+    if (host) {
+      host.innerHTML = "";
+    }
+    setRemoteVideoTracks(0);
+
+    remoteTrackCleanupRef.current = bindRemoteTrack(
+      call.room,
+      (_trackId, kind, element) => {
+        const container = remoteTracksHostRef.current;
+        if (!container) {
+          element.remove();
+          return;
+        }
+
+        if (kind === "audio") {
+          element.className = "messenger-remote-audio";
+        } else {
+          element.className = "messenger-remote-video";
+          setRemoteVideoTracks((count) => count + 1);
+        }
+
+        container.appendChild(element);
+        void element.play().catch(() => {
+          // Ignore autoplay restrictions while call is active.
+        });
+      },
+      (_trackId, kind) => {
+        if (kind === "video") {
+          setRemoteVideoTracks((count) => Math.max(0, count - 1));
+        }
+      }
+    );
+  }, []);
+
   useEffect(() => {
     outgoingCallRef.current = outgoingCall;
   }, [outgoingCall]);
@@ -265,12 +333,36 @@ export default function ChatPage() {
   }, [activeCall]);
 
   useEffect(() => {
+    if (!activeCall || !callRef.current) {
+      return;
+    }
+    bindCallMediaTracks(callRef.current);
+  }, [activeCall, bindCallMediaTracks]);
+
+  useEffect(() => {
+    composeActionModeRef.current = composeActionMode;
+  }, [composeActionMode]);
+
+  useEffect(() => {
     mediaPreviewsRef.current = mediaPreviews;
   }, [mediaPreviews]);
 
   useEffect(() => {
     nicknamesRef.current = nicknames;
   }, [nicknames]);
+
+  useEffect(() => {
+    if (!mobileDrawerOpen) {
+      return;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMobileDrawerOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [mobileDrawerOpen]);
 
   useEffect(() => {
     if (!selectedPeerId) {
@@ -283,6 +375,17 @@ export default function ChatPage() {
   useEffect(() => {
     scrollThreadToBottom("auto");
   }, [messages, selectedPeerId, scrollThreadToBottom]);
+
+  useEffect(() => {
+    const input = draftInputRef.current;
+    if (!input) {
+      return;
+    }
+
+    input.style.height = "0px";
+    const nextHeight = Math.max(50, Math.min(input.scrollHeight, 190));
+    input.style.height = `${nextHeight}px`;
+  }, [draft]);
 
   const mergeMessage = useCallback(
     async (message: UiMessage) => {
@@ -420,6 +523,16 @@ export default function ChatPage() {
         await cancelCallNotification(incomingCallRef.current.roomName);
       }
 
+      remoteTrackCleanupRef.current?.();
+      remoteTrackCleanupRef.current = null;
+      const remoteHost = remoteTracksHostRef.current;
+      if (remoteHost) {
+        remoteHost.innerHTML = "";
+      }
+      setRemoteVideoTracks(0);
+      setActiveMeetUrl(null);
+      setCallError(null);
+
       await endLiveKitConnection(callRef.current);
       callRef.current = null;
       setIncomingCall(null);
@@ -503,6 +616,7 @@ export default function ChatPage() {
             roomName: event.payload.roomName,
             callType: event.payload.callType
           };
+          setCallError(null);
           setIncomingCall(nextIncoming);
           incomingCallRef.current = nextIncoming;
           await notifyIncomingCall({
@@ -522,14 +636,28 @@ export default function ChatPage() {
             const pending = outgoingCallRef.current;
             setOutgoingCall(null);
             outgoingCallRef.current = null;
-            const call = await createLiveKitConnection(pending.roomName, pending.callType);
-            callRef.current = call;
-            setActiveCall({
-              peerId: pending.peerId,
-              roomName: pending.roomName,
-              callType: pending.callType
-            });
-            setStatus(`Connected with ${displayNameForUser(pending.peerId)}`);
+            setCallError(null);
+            try {
+              const call = await createLiveKitConnection(pending.roomName, pending.callType);
+              callRef.current = call;
+              setActiveMeetUrl(call.meetUrl);
+              setActiveCall({
+                peerId: pending.peerId,
+                roomName: pending.roomName,
+                callType: pending.callType
+              });
+              setStatus(`Connected with ${displayNameForUser(pending.peerId)}`);
+            } catch {
+              setCallError("Unable to join LiveKit room. Check call permissions and server setup.");
+              setStatus("Unable to connect call");
+              sendClientEvent(
+                makeClientEvent("call:end", {
+                  to: pending.peerId,
+                  roomName: pending.roomName
+                })
+              );
+              await terminateCall(false);
+            }
           }
           return;
         case "call:decline":
@@ -538,6 +666,7 @@ export default function ChatPage() {
             setOutgoingCall(null);
             outgoingCallRef.current = null;
           }
+          setCallError(null);
           setStatus(`${displayNameForUser(event.payload.to)} declined the call`);
           await terminateCall(false);
           return;
@@ -545,6 +674,7 @@ export default function ChatPage() {
           clearCallTimeout();
           setOutgoingCall(null);
           outgoingCallRef.current = null;
+          setCallError(null);
           setStatus("Call ended");
           await terminateCall(false);
           return;
@@ -691,8 +821,11 @@ export default function ChatPage() {
     });
 
     return () => {
+      clearComposeHoldTimer();
       clearCallTimeout();
       socketRef.current?.close();
+      remoteTrackCleanupRef.current?.();
+      remoteTrackCleanupRef.current = null;
       void terminateCall(false);
       const stream = videoStreamRef.current;
       if (stream) {
@@ -702,7 +835,7 @@ export default function ChatPage() {
         URL.revokeObjectURL(entry.objectUrl);
       });
     };
-  }, [bootstrap, clearCallTimeout, router, terminateCall]);
+  }, [bootstrap, clearCallTimeout, clearComposeHoldTimer, router, terminateCall]);
 
   useEffect(() => {
     const currentSession = authRef.current;
@@ -871,81 +1004,280 @@ export default function ChatPage() {
   }, []);
 
   const startAudioNote = useCallback(async () => {
-    if (audioRecording || videoRecording) {
+    if (audioRecorderRef.current || videoRecorderRef.current) {
       return;
     }
 
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const chunks: BlobPart[] = [];
-    const recorder = new MediaRecorder(stream);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const chunks: BlobPart[] = [];
+      const recorder = new MediaRecorder(stream);
 
-    audioRecorderRef.current = recorder;
+      audioUploadBehaviorRef.current = "send";
+      audioRecorderRef.current = recorder;
 
-    recorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        chunks.push(event.data);
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          chunks.push(event.data);
+        }
+      };
+
+      recorder.onstop = () => {
+        const shouldSend = audioUploadBehaviorRef.current === "send";
+        const blob = new Blob(chunks, { type: "audio/webm" });
+        if (shouldSend && blob.size > 0) {
+          const file = new File([blob], `voice-${Date.now()}.webm`, { type: "audio/webm" });
+          void sendMediaFile(file, "audio");
+        }
+
+        stream.getTracks().forEach((track) => track.stop());
+        setAudioRecording(false);
+        audioRecorderRef.current = null;
+        audioUploadBehaviorRef.current = "send";
+      };
+
+      recorder.start();
+      setAudioRecording(true);
+    } catch {
+      setStatus("Microphone access is required for voice notes.");
+      setComposeActionMode("idle");
+    }
+  }, [sendMediaFile]);
+
+  const stopAudioNote = useCallback((behavior: "send" | "discard" = "send"): Promise<void> => {
+    audioUploadBehaviorRef.current = behavior;
+
+    return new Promise((resolve) => {
+      const recorder = audioRecorderRef.current;
+      if (!recorder || recorder.state === "inactive") {
+        setAudioRecording(false);
+        audioRecorderRef.current = null;
+        resolve();
+        return;
       }
-    };
 
-    recorder.onstop = () => {
-      const blob = new Blob(chunks, { type: "audio/webm" });
-      const file = new File([blob], `voice-${Date.now()}.webm`, { type: "audio/webm" });
-      void sendMediaFile(file, "audio");
-      stream.getTracks().forEach((track) => track.stop());
-      setAudioRecording(false);
-      audioRecorderRef.current = null;
-    };
-
-    recorder.start();
-    setAudioRecording(true);
-  }, [audioRecording, sendMediaFile, videoRecording]);
-
-  const stopAudioNote = useCallback(() => {
-    audioRecorderRef.current?.stop();
+      recorder.addEventListener(
+        "stop",
+        () => {
+          resolve();
+        },
+        { once: true }
+      );
+      recorder.stop();
+    });
   }, []);
 
   const startVideoNote = useCallback(async () => {
-    if (audioRecording || videoRecording) {
+    if (videoRecorderRef.current || audioRecorderRef.current) {
       return;
     }
 
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-    videoStreamRef.current = stream;
-    if (videoPreviewRef.current) {
-      videoPreviewRef.current.srcObject = stream;
-      void videoPreviewRef.current.play().catch(() => {
-        // Ignore autoplay restrictions.
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+      videoStreamRef.current = stream;
+      if (videoPreviewRef.current) {
+        videoPreviewRef.current.srcObject = stream;
+        void videoPreviewRef.current.play().catch(() => {
+          // Ignore autoplay restrictions.
+        });
+      }
+
+      const chunks: BlobPart[] = [];
+      const candidates = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"];
+      const mimeType = candidates.find((entry) => MediaRecorder.isTypeSupported(entry));
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+
+      videoUploadBehaviorRef.current = "send";
+      videoRecorderRef.current = recorder;
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          chunks.push(event.data);
+        }
+      };
+
+      recorder.onstop = () => {
+        const shouldSend = videoUploadBehaviorRef.current === "send";
+        const blob = new Blob(chunks, { type: mimeType ?? "video/webm" });
+        if (shouldSend && blob.size > 0) {
+          const file = new File([blob], `video-note-${Date.now()}.webm`, { type: mimeType ?? "video/webm" });
+          void sendMediaFile(file, "video");
+        }
+        stopVideoCaptureStream();
+        setVideoRecording(false);
+        videoRecorderRef.current = null;
+        videoUploadBehaviorRef.current = "send";
+      };
+
+      recorder.start();
+      setVideoRecording(true);
+    } catch {
+      setStatus("Camera and microphone access are required for video notes.");
+      setComposeActionMode("idle");
+    }
+  }, [sendMediaFile, stopVideoCaptureStream]);
+
+  const stopVideoNote = useCallback(
+    (behavior: "send" | "discard" = "send"): Promise<void> => {
+      videoUploadBehaviorRef.current = behavior;
+
+      return new Promise((resolve) => {
+        const recorder = videoRecorderRef.current;
+        if (!recorder || recorder.state === "inactive") {
+          stopVideoCaptureStream();
+          setVideoRecording(false);
+          videoRecorderRef.current = null;
+          resolve();
+          return;
+        }
+
+        recorder.addEventListener(
+          "stop",
+          () => {
+            resolve();
+          },
+          { once: true }
+        );
+        recorder.stop();
       });
+    },
+    [stopVideoCaptureStream]
+  );
+
+  const startHoldRecording = useCallback(async () => {
+    if (draft.trim() || !selectedPeerRef.current || audioRecorderRef.current || videoRecorderRef.current) {
+      setComposeActionMode("idle");
+      return;
     }
 
-    const chunks: BlobPart[] = [];
-    const candidates = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"];
-    const mimeType = candidates.find((entry) => MediaRecorder.isTypeSupported(entry));
-    const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+    if (composeWantsVideoRef.current) {
+      setComposeActionMode("video");
+      await startVideoNote();
+      return;
+    }
 
-    videoRecorderRef.current = recorder;
-    recorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        chunks.push(event.data);
+    setComposeActionMode("voice");
+    await startAudioNote();
+  }, [draft, startAudioNote, startVideoNote]);
+
+  const switchVoiceRecordingToVideo = useCallback(async () => {
+    if (!audioRecorderRef.current || videoRecorderRef.current) {
+      return;
+    }
+    await stopAudioNote("discard");
+    await startVideoNote();
+  }, [startVideoNote, stopAudioNote]);
+
+  const finalizeComposeGesture = useCallback(
+    async (commit: boolean) => {
+      clearComposeHoldTimer();
+
+      composePointerIdRef.current = null;
+      composePointerStartYRef.current = null;
+      composeWantsVideoRef.current = false;
+      setComposeDragOffset(0);
+
+      const mode = composeActionModeRef.current;
+      if (mode === "voice") {
+        suppressComposeClickRef.current = true;
+        await stopAudioNote(commit ? "send" : "discard");
+      } else if (mode === "video") {
+        suppressComposeClickRef.current = true;
+        await stopVideoNote(commit ? "send" : "discard");
+      } else if (mode === "armed") {
+        suppressComposeClickRef.current = true;
       }
-    };
 
-    recorder.onstop = () => {
-      const blob = new Blob(chunks, { type: mimeType ?? "video/webm" });
-      const file = new File([blob], `video-note-${Date.now()}.webm`, { type: mimeType ?? "video/webm" });
-      void sendMediaFile(file, "video");
-      stopVideoCaptureStream();
-      setVideoRecording(false);
-      videoRecorderRef.current = null;
-    };
+      setComposeActionMode("idle");
+    },
+    [clearComposeHoldTimer, stopAudioNote, stopVideoNote]
+  );
 
-    recorder.start();
-    setVideoRecording(true);
-  }, [audioRecording, sendMediaFile, stopVideoCaptureStream, videoRecording]);
+  const onComposeActionPointerDown = useCallback(
+    (event: React.PointerEvent<HTMLButtonElement>) => {
+      if (draft.trim() || !selectedPeerRef.current || audioRecorderRef.current || videoRecorderRef.current) {
+        return;
+      }
 
-  const stopVideoNote = useCallback(() => {
-    videoRecorderRef.current?.stop();
-  }, []);
+      composePointerIdRef.current = event.pointerId;
+      composePointerStartYRef.current = event.clientY;
+      composeWantsVideoRef.current = false;
+      setComposeDragOffset(0);
+      setComposeActionMode("armed");
+
+      clearComposeHoldTimer();
+      composeHoldTimerRef.current = window.setTimeout(() => {
+        composeHoldTimerRef.current = null;
+        void startHoldRecording();
+      }, HOLD_TO_RECORD_MS);
+
+      event.currentTarget.setPointerCapture(event.pointerId);
+    },
+    [clearComposeHoldTimer, draft, startHoldRecording]
+  );
+
+  const onComposeActionPointerMove = useCallback(
+    (event: React.PointerEvent<HTMLButtonElement>) => {
+      if (composePointerIdRef.current !== event.pointerId) {
+        return;
+      }
+
+      const startY = composePointerStartYRef.current;
+      if (startY === null) {
+        return;
+      }
+
+      const dragUp = Math.max(0, startY - event.clientY);
+      setComposeDragOffset(Math.min(120, dragUp));
+      const wantsVideo = dragUp >= DRAG_TO_VIDEO_THRESHOLD;
+      const previouslyWantedVideo = composeWantsVideoRef.current;
+      composeWantsVideoRef.current = wantsVideo;
+
+      if (wantsVideo && !previouslyWantedVideo && composeActionModeRef.current === "voice") {
+        setComposeActionMode("video");
+        void switchVoiceRecordingToVideo();
+      }
+    },
+    [switchVoiceRecordingToVideo]
+  );
+
+  const onComposeActionPointerUp = useCallback(
+    (event: React.PointerEvent<HTMLButtonElement>) => {
+      if (composePointerIdRef.current !== event.pointerId) {
+        return;
+      }
+      void finalizeComposeGesture(true);
+    },
+    [finalizeComposeGesture]
+  );
+
+  const onComposeActionPointerCancel = useCallback(
+    (event: React.PointerEvent<HTMLButtonElement>) => {
+      if (composePointerIdRef.current !== event.pointerId) {
+        return;
+      }
+      void finalizeComposeGesture(false);
+    },
+    [finalizeComposeGesture]
+  );
+
+  const onComposeActionClick = useCallback(
+    (event: React.MouseEvent<HTMLButtonElement>) => {
+      if (suppressComposeClickRef.current) {
+        event.preventDefault();
+        suppressComposeClickRef.current = false;
+        return;
+      }
+
+      if (!selectedPeerRef.current) {
+        return;
+      }
+
+      if (draft.trim()) {
+        void sendText();
+      }
+    },
+    [draft, sendText]
+  );
 
   const onDraftChange = useCallback(
     (value: string) => {
@@ -1044,6 +1376,8 @@ export default function ChatPage() {
 
       setOutgoingCall(pendingCall);
       outgoingCallRef.current = pendingCall;
+      setCallError(null);
+      setActiveMeetUrl(null);
       setStatus(`Calling ${displayNameForUser(peerId)}...`);
 
       clearCallTimeout();
@@ -1084,17 +1418,31 @@ export default function ChatPage() {
       })
     );
 
-    const call = await createLiveKitConnection(currentIncoming.roomName, currentIncoming.callType);
-    callRef.current = call;
-    setActiveCall({
-      peerId: currentIncoming.from,
-      roomName: currentIncoming.roomName,
-      callType: currentIncoming.callType
-    });
-    setIncomingCall(null);
-    incomingCallRef.current = null;
-    setStatus(`Connected with ${displayNameForUser(currentIncoming.from)}`);
-  }, [displayNameForUser, sendClientEvent]);
+    setCallError(null);
+    try {
+      const call = await createLiveKitConnection(currentIncoming.roomName, currentIncoming.callType);
+      callRef.current = call;
+      setActiveMeetUrl(call.meetUrl);
+      setActiveCall({
+        peerId: currentIncoming.from,
+        roomName: currentIncoming.roomName,
+        callType: currentIncoming.callType
+      });
+      setIncomingCall(null);
+      incomingCallRef.current = null;
+      setStatus(`Connected with ${displayNameForUser(currentIncoming.from)}`);
+    } catch {
+      setCallError("Unable to connect call.");
+      sendClientEvent(
+        makeClientEvent("call:end", {
+          to: currentIncoming.from,
+          roomName: currentIncoming.roomName
+        })
+      );
+      await terminateCall(false);
+      setStatus("Call connection failed");
+    }
+  }, [displayNameForUser, sendClientEvent, terminateCall]);
 
   const declineIncomingCall = useCallback(() => {
     const currentIncoming = incomingCallRef.current;
@@ -1213,6 +1561,7 @@ export default function ChatPage() {
       setDraft("");
       setSelectedPeerId(nextPeer);
       setDashboardTab("main");
+      setMobileDrawerOpen(false);
     },
     [sendClientEvent]
   );
@@ -1222,15 +1571,85 @@ export default function ChatPage() {
     [displayNameForUser, selectedPeerId]
   );
 
+  const composeHint = useMemo(() => {
+    if (!selectedPeerId) {
+      return "Choose a user to start chatting.";
+    }
+    if (videoRecording || composeActionMode === "video") {
+      return "Release to send video note.";
+    }
+    if (audioRecording || composeActionMode === "voice") {
+      return "Recording voice note. Drag up to switch video.";
+    }
+    if (!draft.trim()) {
+      return "Hold button for voice. Drag up while holding for video note.";
+    }
+    return "Tap send to deliver encrypted message.";
+  }, [audioRecording, composeActionMode, draft, selectedPeerId, videoRecording]);
+
+  const composeActionLabel = useMemo(() => {
+    if (draft.trim()) {
+      return "Send";
+    }
+    if (videoRecording || composeActionMode === "video") {
+      return "Video";
+    }
+    if (audioRecording || composeActionMode === "voice") {
+      return "Voice";
+    }
+    if (composeDragOffset >= DRAG_TO_VIDEO_THRESHOLD) {
+      return "Video";
+    }
+    return "Hold";
+  }, [audioRecording, composeActionMode, composeDragOffset, draft, videoRecording]);
+
+  const composeActionClassName = useMemo(() => {
+    if (draft.trim()) {
+      return "compose-action-button ready-send";
+    }
+    if (videoRecording || composeActionMode === "video" || composeDragOffset >= DRAG_TO_VIDEO_THRESHOLD) {
+      return "compose-action-button recording-video";
+    }
+    if (audioRecording || composeActionMode === "voice") {
+      return "compose-action-button recording-voice";
+    }
+    if (composeActionMode === "armed") {
+      return "compose-action-button armed";
+    }
+    return "compose-action-button";
+  }, [audioRecording, composeActionMode, composeDragOffset, draft, videoRecording]);
+
+  const openMeetLink = useCallback(() => {
+    if (!activeMeetUrl) {
+      return;
+    }
+    window.open(activeMeetUrl, "_blank", "noopener,noreferrer");
+  }, [activeMeetUrl]);
+
   return (
-    <main className="messenger-layout">
-      <aside className="panel messenger-sidebar">
+    <main className={`messenger-layout${mobileDrawerOpen ? " sidebar-open" : ""}`}>
+      <button
+        type="button"
+        className={`messenger-mobile-backdrop${mobileDrawerOpen ? " active" : ""}`}
+        onClick={() => setMobileDrawerOpen(false)}
+        aria-label="Close dashboard"
+        tabIndex={mobileDrawerOpen ? 0 : -1}
+      />
+
+      <aside id="dashboard-panel" className={`panel messenger-sidebar${mobileDrawerOpen ? " open" : ""}`}>
         <div className="messenger-sidebar-header">
           <Avatar name={auth?.profile.displayName ?? "Me"} avatarUrl={auth?.profile.avatarUrl} size={42} />
           <div>
             <h1 className="messenger-title">Dashboard</h1>
             <p className="muted messenger-subtitle">Socket: {socketStatus}</p>
           </div>
+          <button
+            className="secondary messenger-sidebar-close"
+            onClick={() => setMobileDrawerOpen(false)}
+            type="button"
+          >
+            Close
+          </button>
         </div>
 
         <div className="messenger-nav">
@@ -1361,6 +1780,15 @@ export default function ChatPage() {
           </div>
           <div className="messenger-chat-actions">
             <button
+              className="secondary messenger-drawer-toggle"
+              onClick={() => setMobileDrawerOpen((open) => !open)}
+              type="button"
+              aria-controls="dashboard-panel"
+              aria-expanded={mobileDrawerOpen}
+            >
+              {mobileDrawerOpen ? "Close" : "Dashboard"}
+            </button>
+            <button
               className="secondary"
               onClick={() => void startCall("audio")}
               disabled={!selectedPeerId || !!activeCall || !!outgoingCall}
@@ -1394,11 +1822,28 @@ export default function ChatPage() {
         ) : null}
 
         {activeCall ? (
-          <div className="messenger-call-banner">
-            In call with {displayNameForUser(activeCall.peerId)} ({activeCall.callType})
-            <button className="warn" onClick={() => void terminateCall(true)} type="button">
-              End Call
-            </button>
+          <div className="messenger-call-banner messenger-call-active">
+            <div className="messenger-call-line">
+              <strong>
+                In call with {displayNameForUser(activeCall.peerId)} ({activeCall.callType})
+              </strong>
+              <div className="messenger-call-actions">
+                {activeMeetUrl ? (
+                  <button className="secondary" onClick={openMeetLink} type="button">
+                    Open Meet
+                  </button>
+                ) : null}
+                <button className="warn" onClick={() => void terminateCall(true)} type="button">
+                  End Call
+                </button>
+              </div>
+            </div>
+            {callError ? <p className="muted">{callError}</p> : null}
+            <div
+              ref={remoteTracksHostRef}
+              className={`messenger-call-media${remoteVideoTracks > 0 ? " has-video" : ""}`}
+            />
+            {remoteVideoTracks === 0 ? <p className="muted">Waiting for remote media...</p> : null}
           </div>
         ) : null}
 
@@ -1411,7 +1856,7 @@ export default function ChatPage() {
               muted
               style={{ width: "100%", borderRadius: "12px", maxHeight: "220px", objectFit: "cover" }}
             />
-            <button className="warn" style={{ marginTop: "0.6rem" }} onClick={stopVideoNote} type="button">
+            <button className="warn" style={{ marginTop: "0.6rem" }} onClick={() => void stopVideoNote()} type="button">
               Stop Video
             </button>
           </div>
@@ -1424,22 +1869,9 @@ export default function ChatPage() {
             return (
               <article
                 key={`${message.clientMessageId}-${message.serverId ?? "local"}`}
-                style={{
-                  marginBottom: "0.75rem",
-                  display: "flex",
-                  justifyContent: own ? "flex-end" : "flex-start"
-                }}
+                className={`messenger-message-row${own ? " own" : " peer"}`}
               >
-                <div
-                  className="chat-bubble"
-                  style={{
-                    width: "min(85%, 460px)",
-                    borderRadius: "12px",
-                    padding: "0.65rem 0.75rem",
-                    background: own ? "rgba(38, 198, 165, 0.2)" : "rgba(255, 255, 255, 0.08)",
-                    border: "1px solid rgba(159, 195, 209, 0.2)"
-                  }}
-                >
+                <div className={`chat-bubble${own ? " own" : " peer"}`}>
                   <small className="muted" style={{ display: "block", marginBottom: "0.35rem" }}>
                     {displayNameForUser(message.sender)} | {formatTime(message.createdAt)} | {message.status}
                   </small>
@@ -1496,28 +1928,8 @@ export default function ChatPage() {
         </div>
 
         <footer className="messenger-compose">
-          <textarea
-            rows={3}
-            placeholder={selectedPeerId ? "Type encrypted message..." : "Select a user first..."}
-            value={draft}
-            onChange={(event) => {
-              onDraftChange(event.target.value);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                void sendText();
-              }
-            }}
-            disabled={!selectedPeerId}
-          />
-
-          <div className="chat-compose-actions" style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap" }}>
-            <button onClick={() => void sendText()} disabled={!selectedPeerId || !draft.trim()}>
-              Send
-            </button>
-
-            <label style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}>
+          <div className={`messenger-compose-bar${composeActionMode !== "idle" ? " engaged" : ""}`}>
+            <label className="messenger-compose-upload">
               <input
                 type="file"
                 style={{ display: "none" }}
@@ -1539,35 +1951,46 @@ export default function ChatPage() {
                   input?.click();
                 }}
                 disabled={!selectedPeerId}
+                aria-label="Upload file"
               >
-                Upload
+                +
               </button>
             </label>
 
-            {!audioRecording ? (
-              <button
-                className="secondary"
-                onClick={() => void startAudioNote()}
-                disabled={!selectedPeerId || videoRecording}
-              >
-                Voice
-              </button>
-            ) : (
-              <button className="warn" onClick={stopAudioNote}>
-                Stop Voice
-              </button>
-            )}
+            <textarea
+              ref={draftInputRef}
+              rows={1}
+              className="messenger-compose-input"
+              placeholder={selectedPeerId ? "Type encrypted message..." : "Select a user first..."}
+              value={draft}
+              onChange={(event) => {
+                onDraftChange(event.target.value);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  void sendText();
+                }
+              }}
+              disabled={!selectedPeerId}
+            />
 
-            {!videoRecording ? (
-              <button
-                className="secondary"
-                onClick={() => void startVideoNote()}
-                disabled={!selectedPeerId || audioRecording}
-              >
-                Video Note
-              </button>
-            ) : null}
+            <button
+              type="button"
+              className={composeActionClassName}
+              style={{ transform: `translateY(${Math.min(0, -composeDragOffset * 0.2)}px)` }}
+              onPointerDown={onComposeActionPointerDown}
+              onPointerMove={onComposeActionPointerMove}
+              onPointerUp={onComposeActionPointerUp}
+              onPointerCancel={onComposeActionPointerCancel}
+              onClick={onComposeActionClick}
+              disabled={!selectedPeerId}
+              aria-label="Send, hold for voice, drag up for video"
+            >
+              {composeActionLabel}
+            </button>
           </div>
+          <p className="muted messenger-compose-hint">{composeHint}</p>
         </footer>
       </section>
     </main>

@@ -17,6 +17,7 @@ html,
 body {
   margin: 0;
   padding: 0;
+  height: 100%;
   min-height: 100%;
   font-family: var(--font-main), "Segoe UI", sans-serif;
   color: var(--text);
@@ -42,8 +43,35 @@ main.chat-shell {
 }
 
 .chat-bubble {
+  width: min(85%, 460px);
   max-width: 100%;
+  border-radius: 14px;
+  padding: 0.68rem 0.78rem;
+  border: 1px solid rgba(159, 195, 209, 0.2);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.22);
   word-break: break-word;
+}
+
+.chat-bubble.peer {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.chat-bubble.own {
+  background: linear-gradient(145deg, rgba(38, 198, 165, 0.3), rgba(11, 85, 99, 0.34));
+}
+
+.messenger-message-row {
+  margin-bottom: 0.75rem;
+  display: flex;
+  animation: chat-rise-in 220ms ease both;
+}
+
+.messenger-message-row.own {
+  justify-content: flex-end;
+}
+
+.messenger-message-row.peer {
+  justify-content: flex-start;
 }
 
 .messenger-layout {
@@ -55,6 +83,8 @@ main.chat-shell {
   grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
   gap: 0.8rem;
   overflow: hidden;
+  position: relative;
+  isolation: isolate;
 }
 
 .messenger-sidebar {
@@ -70,6 +100,11 @@ main.chat-shell {
   align-items: center;
   gap: 0.7rem;
   border-bottom: 1px solid rgba(159, 195, 209, 0.2);
+}
+
+.messenger-sidebar-close {
+  margin-left: auto;
+  display: none;
 }
 
 .messenger-title {
@@ -103,8 +138,8 @@ main.chat-shell {
 .messenger-chat {
   min-height: 0;
   overflow: hidden;
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  display: flex;
+  flex-direction: column;
 }
 
 .messenger-chat-header {
@@ -139,6 +174,10 @@ main.chat-shell {
   flex-wrap: wrap;
 }
 
+.messenger-drawer-toggle {
+  display: none;
+}
+
 .messenger-call-banner {
   margin: 0.65rem 1rem 0;
   padding: 0.75rem 0.8rem;
@@ -149,22 +188,138 @@ main.chat-shell {
   gap: 0.55rem;
 }
 
+.messenger-call-line {
+  display: flex;
+  gap: 0.55rem;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.messenger-call-actions {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.messenger-call-media {
+  min-height: 0;
+}
+
+.messenger-call-media.has-video {
+  min-height: 112px;
+  max-height: 240px;
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(159, 195, 209, 0.2);
+}
+
+.messenger-remote-video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.messenger-remote-audio {
+  width: 0;
+  height: 0;
+  opacity: 0;
+}
+
 .messenger-thread {
+  flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   padding: 0.85rem 1rem;
 }
 
 .messenger-compose {
+  flex-shrink: 0;
   border-top: 1px solid rgba(159, 195, 209, 0.2);
   padding: 0.85rem 1rem 1rem;
   display: grid;
-  gap: 0.65rem;
+  gap: 0.5rem;
+  background: linear-gradient(180deg, rgba(4, 16, 22, 0.3), rgba(4, 16, 22, 0.72));
 }
 
 .messenger-compose textarea {
-  min-height: 5rem;
+  min-height: 3.15rem;
   resize: none;
+}
+
+.messenger-compose-bar {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.55rem;
+  align-items: end;
+}
+
+.messenger-compose-bar.engaged {
+  transform: translateY(-1px);
+}
+
+.messenger-compose-upload {
+  align-self: end;
+}
+
+.messenger-compose-upload button {
+  width: 2.55rem;
+  min-width: 2.55rem;
+  height: 2.55rem;
+  border-radius: 999px;
+  padding: 0;
+  font-size: 1.3rem;
+  line-height: 1;
+}
+
+.messenger-compose-input {
+  min-height: 3.1rem;
+  max-height: 190px;
+  line-height: 1.35;
+}
+
+.compose-action-button {
+  align-self: end;
+  min-width: 4.9rem;
+  height: 2.75rem;
+  border-radius: 999px;
+  padding: 0.4rem 0.95rem;
+  transition:
+    transform 140ms ease,
+    background 180ms ease,
+    box-shadow 180ms ease;
+  box-shadow: 0 8px 18px rgba(12, 169, 137, 0.28);
+}
+
+.compose-action-button.armed {
+  background: linear-gradient(120deg, #ff9a62, #ffd56b);
+}
+
+.compose-action-button.ready-send {
+  background: linear-gradient(120deg, #26c6a5, #1da1f2);
+}
+
+.compose-action-button.recording-voice {
+  background: linear-gradient(120deg, #f7ad45, #f66f5d);
+}
+
+.compose-action-button.recording-video {
+  background: linear-gradient(120deg, #f66f5d, #ff4d7c);
+}
+
+.messenger-compose-hint {
+  margin: 0;
+  font-size: 0.86rem;
+}
+
+.messenger-mobile-backdrop {
+  display: none;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
 }
 
 .panel {
@@ -223,50 +378,162 @@ p.muted {
   color: var(--muted);
 }
 
+@keyframes chat-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 @media (max-width: 720px) {
   main.shell {
-    padding: 0.85rem;
+    padding: 0.75rem;
   }
 
   .messenger-layout {
-    padding: 0.5rem;
-    gap: 0.55rem;
+    width: 100%;
+    height: 100dvh;
+    padding: 0.45rem;
+    gap: 0;
     grid-template-columns: 1fr;
-    grid-template-rows: minmax(230px, 38dvh) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .messenger-mobile-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(2, 9, 13, 0.62);
+    opacity: 0;
+    pointer-events: none;
+    z-index: 30;
+    transition: opacity 180ms ease;
+  }
+
+  .messenger-mobile-backdrop.active {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .messenger-sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: min(86vw, 360px);
+    height: 100dvh;
+    border-radius: 0 18px 18px 0;
+    z-index: 40;
+    transform: translateX(-104%);
+    transition: transform 200ms ease;
+  }
+
+  .messenger-sidebar.open {
+    transform: translateX(0);
+  }
+
+  .messenger-sidebar-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 74px;
+    padding: 0.45rem 0.7rem;
+  }
+
+  .messenger-sidebar-header {
+    padding-right: 0.8rem;
   }
 
   .messenger-nav {
-    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .messenger-chat {
+    height: 100%;
+    border-radius: 16px;
   }
 
   .messenger-chat-header {
-    flex-direction: column;
+    padding: 0.75rem 0.8rem;
     align-items: flex-start;
+    flex-wrap: wrap;
   }
 
   .messenger-chat-actions {
     width: 100%;
+    justify-content: flex-end;
   }
 
   .messenger-chat-actions button {
+    flex: 1 1 calc(33.3% - 0.3rem);
+    min-width: 86px;
+  }
+
+  .messenger-drawer-toggle {
+    display: inline-flex;
+    min-width: 110px;
+  }
+
+  .messenger-thread {
+    padding: 0.75rem 0.8rem;
+  }
+
+  .messenger-call-banner {
+    margin: 0.55rem 0.8rem 0;
+  }
+
+  .messenger-call-line {
+    align-items: flex-start;
+  }
+
+  .messenger-call-actions {
+    width: 100%;
+  }
+
+  .messenger-call-actions button {
     flex: 1 1 calc(50% - 0.3rem);
-    min-width: 118px;
+  }
+
+  .messenger-call-media.has-video {
+    min-height: 148px;
+    max-height: 220px;
   }
 
   .chat-nickname-row {
     flex-direction: column;
   }
 
-  .messenger-compose textarea {
-    min-height: 4.35rem;
+  .messenger-compose {
+    padding: 0.7rem 0.8rem calc(0.8rem + env(safe-area-inset-bottom));
+    gap: 0.55rem;
+  }
+
+  .messenger-compose-bar {
+    gap: 0.48rem;
+  }
+
+  .messenger-compose-input {
+    min-height: 2.95rem;
+    max-height: 34dvh;
+  }
+
+  .messenger-compose-upload button {
+    width: 2.35rem;
+    min-width: 2.35rem;
+    height: 2.35rem;
+    font-size: 1.2rem;
+  }
+
+  .compose-action-button {
+    min-width: 4.6rem;
+    height: 2.45rem;
+    padding: 0.3rem 0.8rem;
   }
 
   .messenger-layout button {
     padding: 0.55rem 0.78rem;
-  }
-
-  .chat-compose-actions > * {
-    flex: 1 1 calc(50% - 0.35rem);
-    min-width: 126px;
   }
 }
