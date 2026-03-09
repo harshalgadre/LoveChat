@@ -1,10 +1,11 @@
-import { createStore, get, set } from "idb-keyval";
+import { createStore, del, get, keys, set } from "idb-keyval";
 
 import type { IdentityKeyPair, SessionState } from "@love-chat/shared";
 
 import type { UiMessage } from "./types";
 
 const store = createStore("lovechat-db", "kv");
+const HOURLY_BACKUP_PREFIX = "lovechat:backup";
 
 function key(prefix: string, userId: string): string {
   return `${prefix}:${userId}`;
@@ -69,4 +70,89 @@ export async function setNickname(userId: string, peerId: string, nickname: stri
   }
 
   await set(key("nicknames", userId), next, store);
+}
+
+export async function clearConversationData(userId: string, peerId: string): Promise<void> {
+  await del(conversationKey("messages", userId, peerId), store);
+  await del(conversationKey("session", userId, peerId), store);
+}
+
+function backupStorageKey(userId: string): string {
+  return `${HOURLY_BACKUP_PREFIX}:${userId}`;
+}
+
+export interface HourlyBackupSnapshot {
+  savedAt: number;
+  selectedPeerId: string | null;
+  messageCount: number;
+  lastServerId: number;
+  nicknames: Record<string, string>;
+  latestConversationMessages: UiMessage[];
+}
+
+export function getHourlyBackup(userId: string): HourlyBackupSnapshot | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const raw = window.localStorage.getItem(backupStorageKey(userId));
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as HourlyBackupSnapshot;
+    if (!parsed || typeof parsed !== "object") {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function setHourlyBackup(userId: string, snapshot: HourlyBackupSnapshot): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.setItem(backupStorageKey(userId), JSON.stringify(snapshot));
+}
+
+export function clearHourlyBackup(userId: string): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.removeItem(backupStorageKey(userId));
+}
+
+export async function getChatBackground(userId: string): Promise<string | null> {
+  return (await get<string>(key("chatBackground", userId), store)) ?? null;
+}
+
+export async function setChatBackground(userId: string, value: string | null): Promise<void> {
+  if (!value) {
+    await del(key("chatBackground", userId), store);
+    return;
+  }
+  await set(key("chatBackground", userId), value, store);
+}
+
+export async function clearUserLocalData(userId: string): Promise<void> {
+  const allKeys = await keys(store);
+  const prefixes = [`identity:${userId}`, `lastServerId:${userId}`, `nicknames:${userId}`, `chatBackground:${userId}`];
+  const conversationPrefixes = [`messages:${userId}:`, `session:${userId}:`];
+
+  const deletions: Promise<void>[] = [];
+  for (const existing of allKeys) {
+    if (typeof existing !== "string") {
+      continue;
+    }
+
+    if (prefixes.includes(existing) || conversationPrefixes.some((prefix) => existing.startsWith(prefix))) {
+      deletions.push(del(existing, store));
+    }
+  }
+
+  await Promise.all(deletions);
+  clearHourlyBackup(userId);
 }

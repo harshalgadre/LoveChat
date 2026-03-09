@@ -45,8 +45,8 @@ export async function createServer() {
   const mediaService = new MediaService();
   const chatGateway = new ChatGateway(messagesService);
 
-  await registerAuthRoutes(app, { usersService, webAuthnService });
-  await registerMessageRoutes(app, { messagesService });
+  await registerAuthRoutes(app, { usersService, webAuthnService, messagesService, mediaService });
+  await registerMessageRoutes(app, { messagesService, mediaService });
   await registerMediaRoutes(app, { mediaService });
   await registerCallRoutes(app);
   await registerChatSocket(app, { chatGateway });

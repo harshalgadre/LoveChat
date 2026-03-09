@@ -2,11 +2,11 @@
 
 import { fromBase64Url, type ClientEvent, type MessageRecord, type MessageType, type UserId } from "@love-chat/shared";
 import type { SessionState } from "@love-chat/shared";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useRouter } from "next/navigation";
 
 import { jsonRequest } from "../../lib/api";
-import { fetchSession, logout, updateIdentityPublicKey, updateProfile } from "../../lib/auth";
+import { deleteAccount, fetchSession, logout, updateIdentityPublicKey, updateProfile } from "../../lib/auth";
 import { fileToBytes } from "../../lib/bytes";
 import { bindRemoteTrack, createLiveKitConnection, endLiveKitConnection, type ActiveCall } from "../../lib/calls";
 import {
@@ -25,9 +25,16 @@ import {
   notifyIncomingMessage
 } from "../../lib/notifications";
 import {
+  clearConversationData,
+  clearUserLocalData,
+  clearHourlyBackup,
+  getChatBackground,
+  getHourlyBackup,
   getLastServerId,
   getMessages,
   getNicknames,
+  setChatBackground,
+  setHourlyBackup,
   setLastServerId,
   setMessages,
   setNickname
@@ -60,6 +67,9 @@ type ComposeActionMode = "idle" | "armed" | "voice" | "video";
 
 const HOLD_TO_RECORD_MS = 260;
 const DRAG_TO_VIDEO_THRESHOLD = 52;
+const VIEW_ONCE_PREFIX = "[[VO1]]:";
+const VIEW_ONCE_AUTO_DELETE_MS = 5_000;
+const HOURLY_BACKUP_INTERVAL_MS = 60 * 60 * 1000;
 
 function formatTime(value: number): string {
   return new Date(value).toLocaleTimeString([], {
@@ -83,6 +93,21 @@ function triggerDownload(fileName: string, objectUrl: string) {
   link.href = objectUrl;
   link.download = fileName;
   link.click();
+}
+
+function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") {
+        resolve(reader.result);
+        return;
+      }
+      reject(new Error("Unable to read file"));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("Unable to read file"));
+    reader.readAsDataURL(file);
+  });
 }
 
 function isUnauthorizedRequestError(error: unknown): boolean {
@@ -179,6 +204,12 @@ export default function ChatPage() {
   const [remoteVideoTracks, setRemoteVideoTracks] = useState(0);
   const [activeMeetUrl, setActiveMeetUrl] = useState<string | null>(null);
   const [callError, setCallError] = useState<string | null>(null);
+  const [sendViewOnce, setSendViewOnce] = useState(false);
+  const [chatBackground, setChatBackgroundState] = useState<string | null>(null);
+  const [chatBackgroundDraft, setChatBackgroundDraft] = useState("");
+  const [clearingChat, setClearingChat] = useState(false);
+  const [deletingAccount, setDeletingAccount] = useState(false);
+  const [hourlyBackupStatus, setHourlyBackupStatus] = useState<string>("");
 
   const authRef = useRef<AuthSession | null>(null);
   const selectedPeerRef = useRef<UserId | null>(null);
@@ -210,6 +241,7 @@ export default function ChatPage() {
   const composeWantsVideoRef = useRef(false);
   const suppressComposeClickRef = useRef(false);
   const composeActionModeRef = useRef<ComposeActionMode>("idle");
+  const viewOnceTimersRef = useRef<Map<string, number>>(new Map());
 
   const peers = useMemo(() => {
     if (!auth) {
@@ -280,6 +312,45 @@ export default function ChatPage() {
       composeHoldTimerRef.current = null;
     }
   }, []);
+
+  const clearViewOnceTimer = useCallback((messageId: string) => {
+    const existing = viewOnceTimersRef.current.get(messageId);
+    if (typeof existing === "number") {
+      window.clearTimeout(existing);
+      viewOnceTimersRef.current.delete(messageId);
+    }
+  }, []);
+
+  const removeMessageByClientId = useCallback(
+    (clientMessageId: string) => {
+      setMessagesState((current) => {
+        const next = current.filter((entry) => entry.clientMessageId !== clientMessageId);
+        void persistMessages(next);
+        return next;
+      });
+    },
+    [persistMessages]
+  );
+
+  const scheduleViewOnceRemoval = useCallback(
+    (message: UiMessage) => {
+      const timerId = window.setTimeout(() => {
+        clearViewOnceTimer(message.clientMessageId);
+        removeMessageByClientId(message.clientMessageId);
+        if (message.serverId) {
+          void jsonRequest<{ ok: boolean }>(`/messages/${message.serverId}`, {
+            method: "DELETE"
+          }).catch(() => {
+            // Best effort cleanup only.
+          });
+        }
+      }, VIEW_ONCE_AUTO_DELETE_MS);
+
+      clearViewOnceTimer(message.clientMessageId);
+      viewOnceTimersRef.current.set(message.clientMessageId, timerId);
+    },
+    [clearViewOnceTimer, removeMessageByClientId]
+  );
 
   const bindCallMediaTracks = useCallback((call: ActiveCall) => {
     remoteTrackCleanupRef.current?.();
@@ -387,6 +458,31 @@ export default function ChatPage() {
     input.style.height = `${nextHeight}px`;
   }, [draft]);
 
+  useEffect(() => {
+    if (!draft.trim() && sendViewOnce) {
+      setSendViewOnce(false);
+    }
+  }, [draft, sendViewOnce]);
+
+  useEffect(() => {
+    for (const message of messages) {
+      if (!message.viewOnce || !message.viewedAt) {
+        continue;
+      }
+      if (viewOnceTimersRef.current.has(message.clientMessageId)) {
+        continue;
+      }
+
+      const elapsed = Date.now() - message.viewedAt;
+      const remaining = Math.max(250, VIEW_ONCE_AUTO_DELETE_MS - elapsed);
+      const timerId = window.setTimeout(() => {
+        clearViewOnceTimer(message.clientMessageId);
+        removeMessageByClientId(message.clientMessageId);
+      }, remaining);
+      viewOnceTimersRef.current.set(message.clientMessageId, timerId);
+    }
+  }, [clearViewOnceTimer, messages, removeMessageByClientId]);
+
   const mergeMessage = useCallback(
     async (message: UiMessage) => {
       setMessagesState((current) => {
@@ -423,7 +519,9 @@ export default function ChatPage() {
 
     try {
       if (record.type === "text" || record.type === "system") {
-        const text = await decryptTextPayload(sharedSecret, record.encryptedPayload, metadata);
+        const decryptedText = await decryptTextPayload(sharedSecret, record.encryptedPayload, metadata);
+        const viewOnce = decryptedText.startsWith(VIEW_ONCE_PREFIX);
+        const text = viewOnce ? decryptedText.slice(VIEW_ONCE_PREFIX.length) : decryptedText;
         return {
           localId: `srv-${record.id}`,
           serverId: record.id,
@@ -432,6 +530,7 @@ export default function ChatPage() {
           recipient: record.recipient,
           type: record.type,
           text,
+          viewOnce,
           createdAt: record.createdAt,
           status: "received"
         };
@@ -756,6 +855,17 @@ export default function ChatPage() {
     const storedNicknames = await getNicknames(session.userId);
     setNicknamesState(storedNicknames);
 
+    const storedBackground = await getChatBackground(session.userId);
+    setChatBackgroundState(storedBackground);
+    setChatBackgroundDraft(storedBackground ?? "");
+
+    const backup = getHourlyBackup(session.userId);
+    if (backup) {
+      setHourlyBackupStatus(`Last backup ${new Date(backup.savedAt).toLocaleTimeString()}`);
+    } else {
+      setHourlyBackupStatus("No hourly backup yet");
+    }
+
     const identity = await ensureIdentityKey(session.userId);
     if (!session.selfIdentityPublicKey || session.selfIdentityPublicKey !== identity.publicKey) {
       await updateIdentityPublicKey(identity.publicKey);
@@ -819,10 +929,15 @@ export default function ChatPage() {
     bootstrap().catch(() => {
       router.replace("/login");
     });
+    const activeTimers = viewOnceTimersRef.current;
 
     return () => {
       clearComposeHoldTimer();
       clearCallTimeout();
+      for (const timerId of activeTimers.values()) {
+        window.clearTimeout(timerId);
+      }
+      activeTimers.clear();
       socketRef.current?.close();
       remoteTrackCleanupRef.current?.();
       remoteTrackCleanupRef.current = null;
@@ -850,15 +965,17 @@ export default function ChatPage() {
     const currentAuth = authRef.current;
     const peerId = selectedPeerRef.current;
     const sessionState = sessionRef.current;
+    const normalizedDraft = draft.trim();
 
-    if (!currentAuth || !peerId || !sessionState || !draft.trim()) {
+    if (!currentAuth || !peerId || !sessionState || !normalizedDraft) {
       return;
     }
 
     const createdAt = Date.now();
     const clientMessageId = crypto.randomUUID();
+    const outgoingText = sendViewOnce ? `${VIEW_ONCE_PREFIX}${normalizedDraft}` : normalizedDraft;
 
-    const encrypted = await encryptTextWithSession(currentAuth.userId, peerId, sessionState, draft.trim(), {
+    const encrypted = await encryptTextWithSession(currentAuth.userId, peerId, sessionState, outgoingText, {
       sender: currentAuth.userId,
       recipient: peerId,
       messageId: clientMessageId,
@@ -882,18 +999,20 @@ export default function ChatPage() {
       sender: currentAuth.userId,
       recipient: peerId,
       type: "text",
-      text: draft.trim(),
+      text: normalizedDraft,
+      viewOnce: sendViewOnce,
       createdAt,
       status: "sending"
     });
 
     setDraft("");
+    setSendViewOnce(false);
     if (typingSentRef.current) {
       sendClientEvent(makeClientEvent("typing:stop", { to: peerId }));
       typingSentRef.current = false;
     }
     scrollThreadToBottom("smooth");
-  }, [draft, mergeMessage, scrollThreadToBottom, sendClientEvent]);
+  }, [draft, mergeMessage, scrollThreadToBottom, sendClientEvent, sendViewOnce]);
 
   const sendMediaFile = useCallback(
     async (file: File, forcedType?: Extract<MessageType, "image" | "video" | "audio" | "document">) => {
@@ -1352,6 +1471,210 @@ export default function ChatPage() {
     [mediaPreviews, openInlineMedia]
   );
 
+  const revealViewOnceMessage = useCallback(
+    (message: UiMessage) => {
+      if (!message.viewOnce || message.viewedAt) {
+        return;
+      }
+
+      setMessagesState((current) => {
+        const next = current.map((entry) =>
+          entry.clientMessageId === message.clientMessageId
+            ? {
+                ...entry,
+                viewedAt: Date.now()
+              }
+            : entry
+        );
+        void persistMessages(next);
+        return next;
+      });
+
+      scheduleViewOnceRemoval({
+        ...message,
+        viewedAt: Date.now()
+      });
+    },
+    [persistMessages, scheduleViewOnceRemoval]
+  );
+
+  const deleteMessage = useCallback(
+    async (message: UiMessage) => {
+      if (message.serverId) {
+        try {
+          await jsonRequest<{ ok: boolean }>(`/messages/${message.serverId}`, {
+            method: "DELETE"
+          });
+        } catch {
+          // Continue with local removal if server cleanup fails.
+        }
+      }
+
+      clearViewOnceTimer(message.clientMessageId);
+      if (message.media) {
+        setMediaPreviews((current) => {
+          const preview = current[message.media!.mediaId];
+          if (!preview) {
+            return current;
+          }
+          URL.revokeObjectURL(preview.objectUrl);
+          const next = {
+            ...current
+          };
+          delete next[message.media!.mediaId];
+          return next;
+        });
+      }
+      setMessagesState((current) => {
+        const next = current.filter((entry) => entry.clientMessageId !== message.clientMessageId);
+        void persistMessages(next);
+        return next;
+      });
+    },
+    [clearViewOnceTimer, persistMessages]
+  );
+
+  const clearCurrentChat = useCallback(async () => {
+    const currentAuth = authRef.current;
+    const peerId = selectedPeerRef.current;
+    if (!currentAuth || !peerId || clearingChat) {
+      return;
+    }
+
+    if (!window.confirm(`Clear full chat with ${displayNameForUser(peerId)}? This cannot be undone.`)) {
+      return;
+    }
+
+    setClearingChat(true);
+    try {
+      await jsonRequest<{ ok: boolean }>("/messages/clear", {
+        method: "POST",
+        body: {
+          peer: peerId
+        }
+      });
+      await clearConversationData(currentAuth.userId, peerId);
+
+      for (const timerId of viewOnceTimersRef.current.values()) {
+        window.clearTimeout(timerId);
+      }
+      viewOnceTimersRef.current.clear();
+
+      setMediaPreviews((current) => {
+        Object.values(current).forEach((entry) => {
+          URL.revokeObjectURL(entry.objectUrl);
+        });
+        return {};
+      });
+      setMessagesState([]);
+      setStatus(`Cleared chat with ${displayNameForUser(peerId)}`);
+    } finally {
+      setClearingChat(false);
+    }
+  }, [clearingChat, displayNameForUser]);
+
+  const deleteMyAccount = useCallback(async () => {
+    const currentAuth = authRef.current;
+    if (!currentAuth || deletingAccount) {
+      return;
+    }
+
+    if (!window.confirm("Delete your account and all chats permanently?")) {
+      return;
+    }
+
+    setDeletingAccount(true);
+    try {
+      await deleteAccount();
+      await clearUserLocalData(currentAuth.userId);
+      clearHourlyBackup(currentAuth.userId);
+      socketRef.current?.close();
+      router.replace("/login");
+    } finally {
+      setDeletingAccount(false);
+    }
+  }, [deletingAccount, router]);
+
+  const saveChatBackground = useCallback(async () => {
+    const currentAuth = authRef.current;
+    if (!currentAuth) {
+      return;
+    }
+
+    const trimmed = chatBackgroundDraft.trim();
+    const nextValue = trimmed || null;
+    await setChatBackground(currentAuth.userId, nextValue);
+    setChatBackgroundState(nextValue);
+    setStatus(nextValue ? "Chat background updated" : "Chat background cleared");
+  }, [chatBackgroundDraft]);
+
+  const onBackgroundFilePick = useCallback(async (file: File) => {
+    const currentAuth = authRef.current;
+    if (!currentAuth) {
+      return;
+    }
+
+    const dataUrl = await fileToDataUrl(file);
+    setChatBackgroundDraft(dataUrl);
+    await setChatBackground(currentAuth.userId, dataUrl);
+    setChatBackgroundState(dataUrl);
+    setStatus("Chat background updated");
+  }, []);
+
+  const saveHourlyBackupSnapshot = useCallback(async () => {
+    const currentAuth = authRef.current;
+    if (!currentAuth) {
+      return;
+    }
+
+    const peerId = selectedPeerRef.current;
+    const currentLastServerId = await getLastServerId(currentAuth.userId);
+    setHourlyBackup(currentAuth.userId, {
+      savedAt: Date.now(),
+      selectedPeerId: peerId,
+      messageCount: messages.length,
+      lastServerId: currentLastServerId,
+      nicknames: nicknamesRef.current,
+      latestConversationMessages: messages.slice(-200)
+    });
+    setHourlyBackupStatus(`Backup saved at ${new Date().toLocaleTimeString()}`);
+  }, [messages]);
+
+  const restoreHourlyBackupSnapshot = useCallback(async () => {
+    const currentAuth = authRef.current;
+    if (!currentAuth) {
+      return;
+    }
+
+    const backup = getHourlyBackup(currentAuth.userId);
+    if (!backup || !backup.selectedPeerId) {
+      setHourlyBackupStatus("No backup available to restore");
+      return;
+    }
+
+    await setMessages(currentAuth.userId, backup.selectedPeerId, backup.latestConversationMessages);
+    await setLastServerId(currentAuth.userId, backup.lastServerId);
+    setNicknamesState(backup.nicknames);
+    setSelectedPeerId(backup.selectedPeerId as UserId);
+    selectedPeerRef.current = backup.selectedPeerId as UserId;
+    setMessagesState(backup.latestConversationMessages);
+    setStatus("Restored last local backup");
+  }, []);
+
+  useEffect(() => {
+    if (!auth?.userId) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      void saveHourlyBackupSnapshot();
+    }, HOURLY_BACKUP_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [auth?.userId, saveHourlyBackupSnapshot]);
+
   const startCall = useCallback(
     async (callType: "audio" | "video") => {
       const peerId = selectedPeerRef.current;
@@ -1559,6 +1882,7 @@ export default function ChatPage() {
         typingSentRef.current = false;
       }
       setDraft("");
+      setSendViewOnce(false);
       setSelectedPeerId(nextPeer);
       setDashboardTab("main");
       setMobileDrawerOpen(false);
@@ -1575,6 +1899,9 @@ export default function ChatPage() {
     if (!selectedPeerId) {
       return "Choose a user to start chatting.";
     }
+    if (sendViewOnce && draft.trim()) {
+      return "View once enabled. Message auto-deletes after first view.";
+    }
     if (videoRecording || composeActionMode === "video") {
       return "Release to send video note.";
     }
@@ -1585,7 +1912,7 @@ export default function ChatPage() {
       return "Hold button for voice. Drag up while holding for video note.";
     }
     return "Tap send to deliver encrypted message.";
-  }, [audioRecording, composeActionMode, draft, selectedPeerId, videoRecording]);
+  }, [audioRecording, composeActionMode, draft, selectedPeerId, sendViewOnce, videoRecording]);
 
   const composeActionLabel = useMemo(() => {
     if (draft.trim()) {
@@ -1625,6 +1952,18 @@ export default function ChatPage() {
     }
     window.open(activeMeetUrl, "_blank", "noopener,noreferrer");
   }, [activeMeetUrl]);
+
+  const chatPanelStyle = useMemo<CSSProperties | undefined>(() => {
+    if (!chatBackground) {
+      return undefined;
+    }
+
+    return {
+      backgroundImage: `linear-gradient(155deg, rgba(5, 18, 24, 0.8), rgba(5, 18, 24, 0.92)), url(${chatBackground})`,
+      backgroundSize: "cover",
+      backgroundPosition: "center"
+    };
+  }, [chatBackground]);
 
   return (
     <main className={`messenger-layout${mobileDrawerOpen ? " sidebar-open" : ""}`}>
@@ -1752,18 +2091,74 @@ export default function ChatPage() {
                 placeholder="https://example.com/avatar.jpg"
               />
 
+              <label style={{ display: "grid", gap: "0.35rem" }}>
+                <span>Avatar Image File</span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) {
+                      void fileToDataUrl(file).then((dataUrl) => {
+                        setProfileAvatarUrl(dataUrl);
+                      });
+                    }
+                    event.currentTarget.value = "";
+                  }}
+                />
+              </label>
+
+              <label htmlFor="chat-background-url">Chat Background URL</label>
+              <input
+                id="chat-background-url"
+                value={chatBackgroundDraft}
+                onChange={(event) => setChatBackgroundDraft(event.target.value)}
+                placeholder="https://example.com/bg.jpg"
+              />
+
+              <label style={{ display: "grid", gap: "0.35rem" }}>
+                <span>Background Image File</span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) {
+                      void onBackgroundFilePick(file);
+                    }
+                    event.currentTarget.value = "";
+                  }}
+                />
+              </label>
+
               <button onClick={() => void saveProfile()} disabled={profileSaving}>
                 Save Settings
               </button>
+              <button className="secondary" onClick={() => void saveChatBackground()} type="button">
+                Save Background
+              </button>
+              <button className="secondary" onClick={() => void clearCurrentChat()} disabled={!selectedPeerId || clearingChat}>
+                {clearingChat ? "Clearing..." : "Clear Current Chat"}
+              </button>
+              <button className="secondary" onClick={() => void saveHourlyBackupSnapshot()} type="button">
+                Backup Now
+              </button>
+              <button className="secondary" onClick={() => void restoreHourlyBackupSnapshot()} type="button">
+                Restore Backup
+              </button>
+              {hourlyBackupStatus ? <p className="muted">{hourlyBackupStatus}</p> : null}
               <button className="warn" onClick={() => void handleLogout()} type="button">
                 Logout
+              </button>
+              <button className="warn" onClick={() => void deleteMyAccount()} disabled={deletingAccount} type="button">
+                {deletingAccount ? "Deleting..." : "Delete Account"}
               </button>
             </div>
           ) : null}
         </div>
       </aside>
 
-      <section className="panel messenger-chat">
+      <section className="panel messenger-chat" style={chatPanelStyle}>
         <header className="messenger-chat-header">
           <div className="messenger-chat-peer">
             <Avatar
@@ -1876,7 +2271,27 @@ export default function ChatPage() {
                     {displayNameForUser(message.sender)} | {formatTime(message.createdAt)} | {message.status}
                   </small>
 
-                  {message.text ? <div style={{ whiteSpace: "pre-wrap" }}>{message.text}</div> : null}
+                  {message.text ? (
+                    message.viewOnce && !own && !message.viewedAt ? (
+                      <button
+                        className="secondary"
+                        type="button"
+                        style={{ width: "100%" }}
+                        onClick={() => revealViewOnceMessage(message)}
+                      >
+                        View Once Message
+                      </button>
+                    ) : (
+                      <div style={{ whiteSpace: "pre-wrap" }}>
+                        {message.text}
+                        {message.viewOnce ? (
+                          <small className="muted" style={{ display: "block", marginTop: "0.35rem" }}>
+                            {message.viewedAt ? "View-once opened" : "View-once pending"}
+                          </small>
+                        ) : null}
+                      </div>
+                    )
+                  ) : null}
 
                   {message.media ? (
                     <div>
@@ -1916,7 +2331,18 @@ export default function ChatPage() {
                         <button className="secondary" onClick={() => void downloadMediaMessage(message)}>
                           Save
                         </button>
+                        <button className="secondary" onClick={() => void deleteMessage(message)} type="button">
+                          Delete
+                        </button>
                       </div>
+                    </div>
+                  ) : null}
+
+                  {!message.media ? (
+                    <div style={{ marginTop: "0.45rem", display: "flex", justifyContent: "flex-end" }}>
+                      <button className="secondary" onClick={() => void deleteMessage(message)} type="button">
+                        Delete
+                      </button>
                     </div>
                   ) : null}
                 </div>
@@ -1974,6 +2400,17 @@ export default function ChatPage() {
               }}
               disabled={!selectedPeerId}
             />
+
+            <button
+              type="button"
+              className={`secondary compose-mode-button${sendViewOnce ? " active" : ""}`}
+              onClick={() => setSendViewOnce((current) => !current)}
+              disabled={!selectedPeerId || !draft.trim()}
+              aria-pressed={sendViewOnce}
+              aria-label="Toggle view once mode"
+            >
+              1x
+            </button>
 
             <button
               type="button"

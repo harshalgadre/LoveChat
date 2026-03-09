@@ -119,6 +119,43 @@ export class MediaService {
     return expired.length;
   }
 
+  async deleteMediaByIds(mediaIds: string[]): Promise<number> {
+    if (!mediaIds.length) {
+      return 0;
+    }
+
+    const uniqueIds = [...new Set(mediaIds)];
+    const { media, mediaBlobs } = await getCollections();
+    const docs = await media.find({ id: { $in: uniqueIds } }).toArray();
+    if (!docs.length) {
+      return 0;
+    }
+
+    const blobIds = docs.map((doc) => doc.storagePath);
+    await media.deleteMany({ id: { $in: uniqueIds } });
+    await mediaBlobs.deleteMany({ _id: { $in: blobIds } });
+    return docs.length;
+  }
+
+  async deleteMediaForUser(userId: UserId): Promise<number> {
+    const { media, mediaBlobs } = await getCollections();
+    const docs = await media
+      .find({
+        $or: [{ sender: userId }, { recipient: userId }]
+      })
+      .toArray();
+
+    if (!docs.length) {
+      return 0;
+    }
+
+    const mediaIds = docs.map((doc) => doc.id);
+    const blobIds = docs.map((doc) => doc.storagePath);
+    await media.deleteMany({ id: { $in: mediaIds } });
+    await mediaBlobs.deleteMany({ _id: { $in: blobIds } });
+    return docs.length;
+  }
+
   private binaryToBytes(value: Binary): Uint8Array {
     return new Uint8Array(value.buffer);
   }

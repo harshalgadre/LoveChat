@@ -35,7 +35,10 @@ export async function createLiveKitConnection(
     }
   });
 
-  const room = new Room();
+  const room = new Room({
+    adaptiveStream: true,
+    dynacast: true
+  });
   await room.connect(tokenPayload.livekitUrl, tokenPayload.token);
   await room.localParticipant.setMicrophoneEnabled(true);
   if (callType === "video") {

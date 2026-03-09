@@ -101,3 +101,13 @@ export async function logout(): Promise<void> {
     clearSessionToken();
   }
 }
+
+export async function deleteAccount(): Promise<void> {
+  try {
+    await jsonRequest<{ ok: boolean }>("/auth/account", {
+      method: "DELETE"
+    });
+  } finally {
+    clearSessionToken();
+  }
+}

@@ -208,4 +208,10 @@ export class UsersService {
 
     return this.getUser(userId);
   }
+
+  async deleteUser(userId: UserId): Promise<boolean> {
+    const { users } = await getCollections();
+    const result = await users.deleteOne({ id: userId });
+    return result.deletedCount > 0;
+  }
 }

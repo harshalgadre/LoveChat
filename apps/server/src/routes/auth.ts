@@ -13,12 +13,16 @@ import {
 import { config } from "../config";
 import { createSessionToken, createWsToken, getCookieName } from "../auth/session";
 import { requireUser } from "../auth/requestAuth";
+import { MediaService } from "../services/mediaService";
+import { MessagesService } from "../services/messagesService";
 import { UserServiceError, UsersService } from "../services/usersService";
 import { WebAuthnService } from "../auth/webauthn";
 
 interface AuthRouteDeps {
   usersService: UsersService;
   webAuthnService: WebAuthnService;
+  messagesService: MessagesService;
+  mediaService: MediaService;
 }
 
 function sendServiceError(reply: FastifyReply, error: unknown): FastifyReply | null {
@@ -193,6 +197,31 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDe
       secure: config.isProd
     });
     return reply.send({ ok: true });
+  });
+
+  app.delete("/auth/account", async (request, reply) => {
+    const userId = await requireUser(request, reply);
+    if (!userId) {
+      return;
+    }
+
+    const deletedMessages = await deps.messagesService.deleteAllForUser(userId);
+    const mediaFromMessages = await deps.mediaService.deleteMediaByIds(deletedMessages.mediaIds);
+    const mediaOwnedByUser = await deps.mediaService.deleteMediaForUser(userId);
+    const deletedUser = await deps.usersService.deleteUser(userId);
+
+    reply.clearCookie(getCookieName(), {
+      path: "/",
+      sameSite: config.sessionCookieSameSite,
+      secure: config.isProd
+    });
+
+    return reply.send({
+      ok: true,
+      deletedUser,
+      deletedMessages: deletedMessages.deletedCount,
+      deletedMedia: mediaFromMessages + mediaOwnedByUser
+    });
   });
 
   app.post("/keys/identity", async (request, reply) => {

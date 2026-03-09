@@ -21,6 +21,8 @@ export interface UiMessage {
   text?: string;
   media?: MediaDescriptor;
   createdAt: number;
+  viewOnce?: boolean;
+  viewedAt?: number;
   status: "sending" | "sent" | "received";
 }
 

@@ -86,7 +86,18 @@ export type UserCredential = z.infer<typeof UserCredentialSchema>;
 export const UserRecordSchema = z.object({
   id: UserIdSchema,
   displayName: z.string().min(1),
-  avatarUrl: z.string().url().optional(),
+  avatarUrl: z
+    .string()
+    .trim()
+    .max(2_000_000)
+    .refine(
+      (value) =>
+        value.startsWith("http://") ||
+        value.startsWith("https://") ||
+        value.startsWith("data:image/"),
+      { message: "Avatar URL must be http(s) URL or data:image/*" }
+    )
+    .optional(),
   phoneNumber: PhoneNumberSchema,
   webauthnCredentials: z.array(UserCredentialSchema),
   identityPublicKey: z.string().min(10).optional(),
@@ -147,7 +158,18 @@ export const IdentityKeyUpdateSchema = z.object({
 export const ProfileUpdateSchema = z
   .object({
     displayName: z.string().trim().min(1).max(60).optional(),
-    avatarUrl: z.string().trim().url().max(500).optional()
+    avatarUrl: z
+      .string()
+      .trim()
+      .max(2_000_000)
+      .refine(
+        (value) =>
+          value.startsWith("http://") ||
+          value.startsWith("https://") ||
+          value.startsWith("data:image/"),
+        { message: "Avatar URL must be http(s) URL or data:image/*" }
+      )
+      .optional()
   })
   .refine((data) => data.displayName !== undefined || data.avatarUrl !== undefined, {
     message: "At least one field is required"
@@ -165,6 +187,10 @@ export const UploadMediaBodySchema = z.object({
 export const MessagesQuerySchema = z.object({
   after: z.coerce.number().int().min(0).default(0),
   peer: UserIdSchema.optional()
+});
+
+export const ClearMessagesBodySchema = z.object({
+  peer: UserIdSchema
 });
 
 export const CallTokenRequestSchema = z.object({

@@ -251,7 +251,7 @@ main.chat-shell {
 
 .messenger-compose-bar {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
   gap: 0.55rem;
   align-items: end;
 }
@@ -291,6 +291,20 @@ main.chat-shell {
     background 180ms ease,
     box-shadow 180ms ease;
   box-shadow: 0 8px 18px rgba(12, 169, 137, 0.28);
+}
+
+.compose-mode-button {
+  align-self: end;
+  width: 2.6rem;
+  min-width: 2.6rem;
+  height: 2.75rem;
+  border-radius: 999px;
+  padding: 0;
+}
+
+.compose-mode-button.active {
+  background: linear-gradient(120deg, #ffbe67, #ff7a59);
+  color: #132228;
 }
 
 .compose-action-button.armed {
@@ -531,6 +545,12 @@ p.muted {
     min-width: 4.6rem;
     height: 2.45rem;
     padding: 0.3rem 0.8rem;
+  }
+
+  .compose-mode-button {
+    width: 2.35rem;
+    min-width: 2.35rem;
+    height: 2.45rem;
   }
 
   .messenger-layout button {
