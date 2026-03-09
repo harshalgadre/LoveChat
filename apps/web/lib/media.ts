@@ -27,7 +27,14 @@ export async function uploadEncryptedMedia(input: {
   formData.append("recipient", input.recipient);
   formData.append("mimeType", input.mimeType);
   formData.append("fileName", input.fileName);
-  formData.append("encryptedPayload", JSON.stringify(input.encryptedPayload));
+  // Keep multipart fields small; server reconstructs ciphertext from uploaded binary bytes.
+  formData.append(
+    "encryptedPayload",
+    JSON.stringify({
+      ...input.encryptedPayload,
+      ciphertext: "__uploaded_binary__"
+    } satisfies EncryptedPayload)
+  );
   formData.append("clientMessageId", input.clientMessageId);
   formData.append("messageType", input.messageType);
 

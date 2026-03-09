@@ -1,6 +1,6 @@
 ﻿import type { FastifyInstance } from "fastify";
 
-import { EncryptedPayloadSchema, UploadMediaBodySchema } from "@love-chat/shared";
+import { EncryptedPayloadSchema, UploadMediaBodySchema, toBase64Url } from "@love-chat/shared";
 
 import { requireUser } from "../auth/requestAuth";
 import { MediaService } from "../services/mediaService";
@@ -43,12 +43,16 @@ export async function registerMediaRoutes(app: FastifyInstance, deps: MediaRoute
     if (!encryptedParsed.success) {
       return reply.status(400).send({ error: "INVALID_ENCRYPTED_PAYLOAD", details: encryptedParsed.error.flatten() });
     }
+    const normalizedEncryptedPayload = {
+      ...encryptedParsed.data,
+      ciphertext: toBase64Url(fileBuffer)
+    };
 
     const bodyParsed = UploadMediaBodySchema.safeParse({
       recipient: fields.recipient,
       mimeType: fields.mimeType,
       fileName: fields.fileName,
-      encryptedPayload: encryptedParsed.data,
+      encryptedPayload: normalizedEncryptedPayload,
       clientMessageId: fields.clientMessageId,
       messageType: fields.messageType
     });

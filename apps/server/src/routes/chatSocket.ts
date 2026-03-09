@@ -22,6 +22,5 @@ export async function registerChatSocket(app: FastifyInstance, deps: ChatSocketD
     }
 
     deps.chatGateway.connect(userId, socket);
-    await deps.chatGateway.sendSyncBatch(userId, 0);
   });
 }

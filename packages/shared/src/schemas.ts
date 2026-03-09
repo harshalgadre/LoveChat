@@ -163,7 +163,8 @@ export const UploadMediaBodySchema = z.object({
 });
 
 export const MessagesQuerySchema = z.object({
-  after: z.coerce.number().int().min(0).default(0)
+  after: z.coerce.number().int().min(0).default(0),
+  peer: UserIdSchema.optional()
 });
 
 export const CallTokenRequestSchema = z.object({

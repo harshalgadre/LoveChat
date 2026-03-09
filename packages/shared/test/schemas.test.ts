@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ClientEventSchema,
+  MessagesQuerySchema,
   MessageStoreSchema,
   ProfileUpdateSchema,
   ServerEventSchema,
@@ -120,5 +121,15 @@ describe("schemas", () => {
     });
 
     expect(parsed.displayName).toBe("Harshal G");
+  });
+
+  it("validates messages query with optional peer filter", () => {
+    const parsed = MessagesQuerySchema.parse({
+      after: "10",
+      peer: "purnima"
+    });
+
+    expect(parsed.after).toBe(10);
+    expect(parsed.peer).toBe("purnima");
   });
 });

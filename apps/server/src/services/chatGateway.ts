@@ -28,8 +28,12 @@ export class ChatGateway {
     set.add(socket);
     this.sockets.set(userId, set);
 
-    socket.on("message", async (raw: RawData) => {
-      await this.handleSocketMessage(userId, raw, socket);
+    socket.on("message", (raw: RawData) => {
+      void this.handleSocketMessage(userId, raw, socket).catch(() => {
+        if (socket.readyState === 1) {
+          socket.send(JSON.stringify({ error: "SERVER_ERROR" }));
+        }
+      });
     });
 
     socket.on("close", () => {

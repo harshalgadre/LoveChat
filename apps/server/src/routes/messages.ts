@@ -21,7 +21,7 @@ export async function registerMessageRoutes(app: FastifyInstance, deps: MessageR
       return reply.status(400).send({ error: "INVALID_QUERY", details: parsed.error.flatten() });
     }
 
-    const messages = await deps.messagesService.getMessagesForUser(userId, parsed.data.after);
+    const messages = await deps.messagesService.getMessagesForUser(userId, parsed.data.after, parsed.data.peer);
     return reply.send({ messages });
   });
 }

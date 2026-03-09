@@ -80,6 +80,38 @@ function triggerDownload(fileName: string, objectUrl: string) {
   link.click();
 }
 
+function isUnauthorizedRequestError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("Request failed (401)");
+}
+
+function mergeUiMessages(current: UiMessage[], incoming: UiMessage[]): UiMessage[] {
+  if (incoming.length === 0) {
+    return current;
+  }
+
+  const next = [...current];
+  for (const message of incoming) {
+    const index = next.findIndex((entry) => {
+      if (message.serverId && entry.serverId) {
+        return message.serverId === entry.serverId;
+      }
+      return message.clientMessageId === entry.clientMessageId;
+    });
+
+    if (index >= 0) {
+      next[index] = {
+        ...next[index],
+        ...message
+      };
+      continue;
+    }
+    next.push(message);
+  }
+
+  next.sort((a, b) => a.createdAt - b.createdAt);
+  return next;
+}
+
 function Avatar({
   name,
   avatarUrl,
@@ -132,7 +164,7 @@ export default function ChatPage() {
   const [mediaPreviews, setMediaPreviews] = useState<Record<string, MediaPreview>>({});
   const [nicknames, setNicknamesState] = useState<Record<string, string>>({});
   const [nicknameDraft, setNicknameDraft] = useState("");
-  const [profileOpen, setProfileOpen] = useState(false);
+  const [dashboardTab, setDashboardTab] = useState<"main" | "directory" | "settings">("main");
   const [profileDisplayName, setProfileDisplayName] = useState("");
   const [profileAvatarUrl, setProfileAvatarUrl] = useState("");
   const [profileSaving, setProfileSaving] = useState(false);
@@ -152,6 +184,10 @@ export default function ChatPage() {
   const videoStreamRef = useRef<MediaStream | null>(null);
   const callRef = useRef<ActiveCall | null>(null);
   const mediaPreviewsRef = useRef<Record<string, MediaPreview>>({});
+  const threadRef = useRef<HTMLDivElement | null>(null);
+  const activeCallRef = useRef<CallState | null>(null);
+  const nicknamesRef = useRef<Record<string, string>>({});
+  const conversationLoadRef = useRef(0);
 
   const peers = useMemo(() => {
     if (!auth) {
@@ -167,17 +203,14 @@ export default function ChatPage() {
     return auth.users.find((entry) => entry.id === selectedPeerId) ?? null;
   }, [auth, selectedPeerId]);
 
-  const displayNameForUser = useCallback(
-    (userId: UserId) => {
-      const nickname = nicknames[userId];
-      if (nickname) {
-        return nickname;
-      }
-      const directoryUser = authRef.current?.users.find((entry) => entry.id === userId);
-      return directoryUser?.displayName ?? userId;
-    },
-    [nicknames]
-  );
+  const displayNameForUser = useCallback((userId: UserId) => {
+    const nickname = nicknamesRef.current[userId];
+    if (nickname) {
+      return nickname;
+    }
+    const directoryUser = authRef.current?.users.find((entry) => entry.id === userId);
+    return directoryUser?.displayName ?? userId;
+  }, []);
 
   const clearCallTimeout = useCallback(() => {
     if (callTimeoutRef.current !== null) {
@@ -207,6 +240,18 @@ export default function ChatPage() {
     }
   }, []);
 
+  const scrollThreadToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
+    const container = threadRef.current;
+    if (!container) {
+      return;
+    }
+
+    container.scrollTo({
+      top: container.scrollHeight,
+      behavior
+    });
+  }, []);
+
   useEffect(() => {
     outgoingCallRef.current = outgoingCall;
   }, [outgoingCall]);
@@ -216,8 +261,16 @@ export default function ChatPage() {
   }, [incomingCall]);
 
   useEffect(() => {
+    activeCallRef.current = activeCall;
+  }, [activeCall]);
+
+  useEffect(() => {
     mediaPreviewsRef.current = mediaPreviews;
   }, [mediaPreviews]);
+
+  useEffect(() => {
+    nicknamesRef.current = nicknames;
+  }, [nicknames]);
 
   useEffect(() => {
     if (!selectedPeerId) {
@@ -227,27 +280,14 @@ export default function ChatPage() {
     setNicknameDraft(nicknames[selectedPeerId] ?? "");
   }, [nicknames, selectedPeerId]);
 
+  useEffect(() => {
+    scrollThreadToBottom("auto");
+  }, [messages, selectedPeerId, scrollThreadToBottom]);
+
   const mergeMessage = useCallback(
     async (message: UiMessage) => {
       setMessagesState((current) => {
-        const index = current.findIndex((entry) => {
-          if (message.serverId && entry.serverId) {
-            return message.serverId === entry.serverId;
-          }
-          return message.clientMessageId === entry.clientMessageId;
-        });
-
-        let next = [...current];
-        if (index >= 0) {
-          next[index] = {
-            ...next[index],
-            ...message
-          };
-        } else {
-          next.push(message);
-          next.sort((a, b) => a.createdAt - b.createdAt);
-        }
-
+        const next = mergeUiMessages(current, [message]);
         void persistMessages(next);
         return next;
       });
@@ -325,14 +365,34 @@ export default function ChatPage() {
 
   const applyServerRecords = useCallback(
     async (records: MessageRecord[]) => {
-      for (const record of records) {
-        const ui = await decryptServerRecord(record);
-        if (ui) {
-          await mergeMessage(ui);
-        }
+      const currentAuth = authRef.current;
+      const peerId = selectedPeerRef.current;
+      if (!currentAuth || !peerId) {
+        return;
       }
+
+      const relevantRecords = records.filter(
+        (record) =>
+          (record.sender === currentAuth.userId && record.recipient === peerId) ||
+          (record.sender === peerId && record.recipient === currentAuth.userId)
+      );
+      if (!relevantRecords.length) {
+        return;
+      }
+
+      const decrypted = await Promise.all(relevantRecords.map((record) => decryptServerRecord(record)));
+      const nextMessages = decrypted.filter((record): record is UiMessage => record !== null);
+      if (!nextMessages.length) {
+        return;
+      }
+
+      setMessagesState((current) => {
+        const next = mergeUiMessages(current, nextMessages);
+        void persistMessages(next);
+        return next;
+      });
     },
-    [decryptServerRecord, mergeMessage]
+    [decryptServerRecord, persistMessages]
   );
 
   const sendClientEvent = useCallback((event: ClientEvent) => {
@@ -341,19 +401,20 @@ export default function ChatPage() {
 
   const terminateCall = useCallback(
     async (notifyPeer: boolean) => {
-      if (notifyPeer && activeCall) {
+      const currentActiveCall = activeCallRef.current;
+      if (notifyPeer && currentActiveCall) {
         sendClientEvent(
           makeClientEvent("call:end", {
-            to: activeCall.peerId,
-            roomName: activeCall.roomName
+            to: currentActiveCall.peerId,
+            roomName: currentActiveCall.roomName
           })
         );
       }
 
       clearCallTimeout();
 
-      if (activeCall?.roomName) {
-        await cancelCallNotification(activeCall.roomName);
+      if (currentActiveCall?.roomName) {
+        await cancelCallNotification(currentActiveCall.roomName);
       }
       if (incomingCallRef.current?.roomName) {
         await cancelCallNotification(incomingCallRef.current.roomName);
@@ -366,8 +427,9 @@ export default function ChatPage() {
       setOutgoingCall(null);
       outgoingCallRef.current = null;
       setActiveCall(null);
+      activeCallRef.current = null;
     },
-    [activeCall, clearCallTimeout, sendClientEvent]
+    [clearCallTimeout, sendClientEvent]
   );
 
   const handleSocketEvent = useCallback(
@@ -426,7 +488,7 @@ export default function ChatPage() {
           await applyServerRecords(event.payload.messages);
           return;
         case "call:start":
-          if (activeCall || outgoingCallRef.current || incomingCallRef.current) {
+          if (activeCallRef.current || outgoingCallRef.current || incomingCallRef.current) {
             sendClientEvent(
               makeClientEvent("call:decline", {
                 to: event.payload.to,
@@ -491,7 +553,6 @@ export default function ChatPage() {
       }
     },
     [
-      activeCall,
       applyServerRecords,
       clearCallTimeout,
       decryptServerRecord,
@@ -503,15 +564,27 @@ export default function ChatPage() {
     ]
   );
 
+  const applyAuthSession = useCallback((session: AuthSession) => {
+    authRef.current = session;
+    setAuth(session);
+    setProfileDisplayName(session.profile.displayName);
+    setProfileAvatarUrl(session.profile.avatarUrl ?? "");
+  }, []);
+
   const loadConversationForPeer = useCallback(
     async (peerId: UserId, sourceSession?: AuthSession) => {
       const currentSession = sourceSession ?? authRef.current;
       if (!currentSession) {
         return;
       }
+      const loadId = conversationLoadRef.current + 1;
+      conversationLoadRef.current = loadId;
 
       selectedPeerRef.current = peerId;
       const localMessages = await getMessages(currentSession.userId, peerId);
+      if (conversationLoadRef.current !== loadId || selectedPeerRef.current !== peerId) {
+        return;
+      }
       setMessagesState(localMessages);
       setPeerTyping(false);
 
@@ -519,27 +592,36 @@ export default function ChatPage() {
       if (!peer?.identityPublicKey) {
         sharedSecretRef.current = null;
         sessionRef.current = null;
-        setStatus(`"${peerId}" has no identity key yet. Ask them to login once.`);
+        if (conversationLoadRef.current === loadId && selectedPeerRef.current === peerId) {
+          setStatus(`"${peerId}" has no identity key yet. Ask them to login once.`);
+        }
         return;
       }
 
       const context = await ensureConversationCrypto(currentSession.userId, peerId, peer.identityPublicKey);
+      if (conversationLoadRef.current !== loadId || selectedPeerRef.current !== peerId) {
+        return;
+      }
       sharedSecretRef.current = context.sharedSecret;
       sessionRef.current = context.session;
 
-      const history = await jsonRequest<{ messages: MessageRecord[] }>("/messages?after=0");
+      const history = await jsonRequest<{ messages: MessageRecord[] }>(
+        `/messages?after=0&peer=${encodeURIComponent(peerId)}`
+      );
+      if (conversationLoadRef.current !== loadId || selectedPeerRef.current !== peerId) {
+        return;
+      }
       await applyServerRecords(history.messages);
-      setStatus(`Secure channel ready with ${displayNameForUser(peerId)}`);
+      if (conversationLoadRef.current === loadId && selectedPeerRef.current === peerId) {
+        setStatus(`Secure channel ready with ${displayNameForUser(peerId)}`);
+      }
     },
     [applyServerRecords, displayNameForUser]
   );
 
   const bootstrap = useCallback(async () => {
     const session = await fetchSession();
-    authRef.current = session;
-    setAuth(session);
-    setProfileDisplayName(session.profile.displayName);
-    setProfileAvatarUrl(session.profile.avatarUrl ?? "");
+    applyAuthSession(session);
 
     const storedNicknames = await getNicknames(session.userId);
     setNicknamesState(storedNicknames);
@@ -553,8 +635,9 @@ export default function ChatPage() {
     if (peers.length > 0) {
       const defaultPeerId = peers[0]!.id;
       setSelectedPeerId(defaultPeerId);
-      await loadConversationForPeer(defaultPeerId, session);
     } else {
+      setSelectedPeerId(null);
+      selectedPeerRef.current = null;
       setStatus("No contacts available yet. Register another user first.");
       setMessagesState([]);
     }
@@ -576,12 +659,31 @@ export default function ChatPage() {
             );
           })();
         }
+      },
+      {
+        refreshToken: async () => {
+          try {
+            const refreshed = await fetchSession();
+            applyAuthSession(refreshed);
+            return refreshed.wsToken;
+          } catch (error) {
+            if (isUnauthorizedRequestError(error)) {
+              return null;
+            }
+            throw error;
+          }
+        },
+        onAuthExpired: () => {
+          setStatus("Session expired. Please login again.");
+          router.replace("/login");
+        }
       }
     );
 
-    socket.connect();
+    socketRef.current?.close();
     socketRef.current = socket;
-  }, [handleSocketEvent, loadConversationForPeer]);
+    socket.connect();
+  }, [applyAuthSession, handleSocketEvent, router]);
 
   useEffect(() => {
     bootstrap().catch(() => {
@@ -603,12 +705,13 @@ export default function ChatPage() {
   }, [bootstrap, clearCallTimeout, router, terminateCall]);
 
   useEffect(() => {
-    if (!auth || !selectedPeerId) {
+    const currentSession = authRef.current;
+    if (!currentSession || !selectedPeerId) {
       return;
     }
 
-    void loadConversationForPeer(selectedPeerId, auth);
-  }, [auth, loadConversationForPeer, selectedPeerId]);
+    void loadConversationForPeer(selectedPeerId, currentSession);
+  }, [loadConversationForPeer, selectedPeerId]);
 
   const sendText = useCallback(async () => {
     const currentAuth = authRef.current;
@@ -656,7 +759,8 @@ export default function ChatPage() {
       sendClientEvent(makeClientEvent("typing:stop", { to: peerId }));
       typingSentRef.current = false;
     }
-  }, [draft, mergeMessage, sendClientEvent]);
+    scrollThreadToBottom("smooth");
+  }, [draft, mergeMessage, scrollThreadToBottom, sendClientEvent]);
 
   const sendMediaFile = useCallback(
     async (file: File, forcedType?: Extract<MessageType, "image" | "video" | "audio" | "document">) => {
@@ -749,8 +853,9 @@ export default function ChatPage() {
         createdAt,
         status: "sending"
       });
+      scrollThreadToBottom("smooth");
     },
-    [mergeMessage, sendClientEvent]
+    [mergeMessage, scrollThreadToBottom, sendClientEvent]
   );
 
   const stopVideoCaptureStream = useCallback(() => {
@@ -1083,7 +1188,7 @@ export default function ChatPage() {
       };
       authRef.current = nextAuth;
       setAuth(nextAuth);
-      setProfileOpen(false);
+      setDashboardTab("main");
       setStatus("Profile updated");
     } finally {
       setProfileSaving(false);
@@ -1096,255 +1201,301 @@ export default function ChatPage() {
     router.replace("/login");
   }, [router]);
 
-  const heading = useMemo(() => {
-    if (!auth) {
-      return "LoveChat";
-    }
-    const selfName = auth.profile.displayName || auth.userId;
-    if (!selectedPeerId) {
-      return selfName;
-    }
-    return `${selfName} -> ${displayNameForUser(selectedPeerId)}`;
-  }, [auth, displayNameForUser, selectedPeerId]);
+  const switchPeer = useCallback(
+    (nextPeer: UserId) => {
+      if (!nextPeer) {
+        return;
+      }
+      if (typingSentRef.current && selectedPeerRef.current) {
+        sendClientEvent(makeClientEvent("typing:stop", { to: selectedPeerRef.current }));
+        typingSentRef.current = false;
+      }
+      setDraft("");
+      setSelectedPeerId(nextPeer);
+      setDashboardTab("main");
+    },
+    [sendClientEvent]
+  );
+
+  const heading = useMemo(
+    () => (selectedPeerId ? displayNameForUser(selectedPeerId) : "Choose a chat"),
+    [displayNameForUser, selectedPeerId]
+  );
 
   return (
-    <main className="shell chat-shell" style={{ minHeight: "100vh", paddingTop: "0.75rem", paddingBottom: "0.75rem" }}>
-      <section className="panel" style={{ padding: "1rem", marginBottom: "0.8rem" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.8rem", flexWrap: "wrap" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
-            <Avatar
-              name={auth?.profile.displayName ?? "Me"}
-              avatarUrl={auth?.profile.avatarUrl}
-              size={36}
-            />
-            {selectedPeer ? (
-              <>
-                <span style={{ opacity: 0.7 }}>→</span>
-                <Avatar
-                  name={displayNameForUser(selectedPeer.id)}
-                  avatarUrl={selectedPeer.avatarUrl}
-                  size={36}
+    <main className="messenger-layout">
+      <aside className="panel messenger-sidebar">
+        <div className="messenger-sidebar-header">
+          <Avatar name={auth?.profile.displayName ?? "Me"} avatarUrl={auth?.profile.avatarUrl} size={42} />
+          <div>
+            <h1 className="messenger-title">Dashboard</h1>
+            <p className="muted messenger-subtitle">Socket: {socketStatus}</p>
+          </div>
+        </div>
+
+        <div className="messenger-nav">
+          <button
+            className={dashboardTab === "main" ? "" : "secondary"}
+            onClick={() => setDashboardTab("main")}
+            type="button"
+          >
+            Main
+          </button>
+          <button
+            className={dashboardTab === "directory" ? "" : "secondary"}
+            onClick={() => setDashboardTab("directory")}
+            type="button"
+          >
+            Registry
+          </button>
+          <button
+            className={dashboardTab === "settings" ? "" : "secondary"}
+            onClick={() => setDashboardTab("settings")}
+            type="button"
+          >
+            Settings
+          </button>
+        </div>
+
+        <div className="messenger-sidebar-body">
+          {dashboardTab === "main" ? (
+            <div className="messenger-panel-stack">
+              <p className="muted">{status}</p>
+              <label htmlFor="peer-select">Active Chat</label>
+              <select
+                id="peer-select"
+                value={selectedPeerId ?? ""}
+                onChange={(event) => switchPeer(event.target.value as UserId)}
+              >
+                <option value="" disabled>
+                  {peers.length ? "Select a user" : "No users available"}
+                </option>
+                {peers.map((entry) => (
+                  <option key={entry.id} value={entry.id}>
+                    {displayNameForUser(entry.id)}
+                  </option>
+                ))}
+              </select>
+
+              <label htmlFor="nickname-input">Nickname For Current Chat</label>
+              <div className="chat-nickname-row" style={{ display: "flex", gap: "0.45rem" }}>
+                <input
+                  id="nickname-input"
+                  value={nicknameDraft}
+                  onChange={(event) => setNicknameDraft(event.target.value)}
+                  placeholder="Set custom name"
+                  disabled={!selectedPeerId}
                 />
-              </>
-            ) : null}
-            <div>
-            <h1 style={{ margin: 0 }}>{heading}</h1>
-            <p className="muted" style={{ marginBottom: 0 }}>
-              Socket: {socketStatus} | {status}
-            </p>
+                <button className="secondary" onClick={() => void saveNickname()} disabled={!selectedPeerId}>
+                  Save
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {dashboardTab === "directory" ? (
+            <div className="messenger-panel-stack">
+              {peers.length ? (
+                peers.map((entry) => {
+                  const selected = entry.id === selectedPeerId;
+                  return (
+                    <button
+                      key={entry.id}
+                      className={selected ? "" : "secondary"}
+                      type="button"
+                      onClick={() => switchPeer(entry.id)}
+                    >
+                      {displayNameForUser(entry.id)}
+                    </button>
+                  );
+                })
+              ) : (
+                <p className="muted">No users available yet.</p>
+              )}
+            </div>
+          ) : null}
+
+          {dashboardTab === "settings" ? (
+            <div className="messenger-panel-stack">
+              <label htmlFor="profile-display-name">Display Name</label>
+              <input
+                id="profile-display-name"
+                value={profileDisplayName}
+                onChange={(event) => setProfileDisplayName(event.target.value)}
+                placeholder="Your display name"
+              />
+
+              <label htmlFor="profile-avatar-url">Avatar URL</label>
+              <input
+                id="profile-avatar-url"
+                value={profileAvatarUrl}
+                onChange={(event) => setProfileAvatarUrl(event.target.value)}
+                placeholder="https://example.com/avatar.jpg"
+              />
+
+              <button onClick={() => void saveProfile()} disabled={profileSaving}>
+                Save Settings
+              </button>
+              <button className="warn" onClick={() => void handleLogout()} type="button">
+                Logout
+              </button>
+            </div>
+          ) : null}
+        </div>
+      </aside>
+
+      <section className="panel messenger-chat">
+        <header className="messenger-chat-header">
+          <div className="messenger-chat-peer">
+            <Avatar
+              name={selectedPeer ? displayNameForUser(selectedPeer.id) : "Chat"}
+              avatarUrl={selectedPeer?.avatarUrl}
+              size={38}
+            />
+            <div style={{ minWidth: 0 }}>
+              <h2>{heading}</h2>
+              <p className="muted">
+                {selectedPeerId ? "Secure chat ready" : "Choose a user from dashboard registry"}
+              </p>
             </div>
           </div>
-          <div style={{ display: "flex", gap: "0.45rem", flexWrap: "wrap" }}>
+          <div className="messenger-chat-actions">
             <button
               className="secondary"
               onClick={() => void startCall("audio")}
               disabled={!selectedPeerId || !!activeCall || !!outgoingCall}
+              type="button"
             >
-              📞 Audio
+              Audio
             </button>
             <button
               className="secondary"
               onClick={() => void startCall("video")}
               disabled={!selectedPeerId || !!activeCall || !!outgoingCall}
+              type="button"
             >
-              🎥 Video
-            </button>
-            <button className="secondary" onClick={() => setProfileOpen((current) => !current)}>
-              ⚙️ Profile
-            </button>
-            <button className="warn" onClick={() => void handleLogout()}>
-              Logout
+              Video
             </button>
           </div>
-        </div>
+        </header>
 
-        <div
-          style={{
-            marginTop: "0.8rem",
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-            gap: "0.7rem"
-          }}
-        >
-          <div>
-            <label htmlFor="peer-select" style={{ display: "block", marginBottom: "0.4rem" }}>
-              Chat With
-            </label>
-            <select
-              id="peer-select"
-              value={selectedPeerId ?? ""}
-              onChange={(event) => {
-                const nextPeer = event.target.value as UserId;
-                if (!nextPeer) {
-                  return;
-                }
-                if (typingSentRef.current && selectedPeerRef.current) {
-                  sendClientEvent(makeClientEvent("typing:stop", { to: selectedPeerRef.current }));
-                  typingSentRef.current = false;
-                }
-                setDraft("");
-                setSelectedPeerId(nextPeer);
-              }}
-            >
-              <option value="" disabled>
-                {peers.length ? "Select a user" : "No users available"}
-              </option>
-              {peers.map((entry) => (
-                <option key={entry.id} value={entry.id}>
-                  {displayNameForUser(entry.id)} ({entry.id})
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label htmlFor="nickname-input" style={{ display: "block", marginBottom: "0.4rem" }}>
-              Nickname For This Chat
-            </label>
-            <div style={{ display: "flex", gap: "0.45rem" }}>
-              <input
-                id="nickname-input"
-                value={nicknameDraft}
-                onChange={(event) => setNicknameDraft(event.target.value)}
-                placeholder="Set custom name"
-                disabled={!selectedPeerId}
-              />
-              <button className="secondary" onClick={() => void saveNickname()} disabled={!selectedPeerId}>
-                Save
-              </button>
+        {incomingCall ? (
+          <div className="messenger-call-banner">
+            <strong>Incoming {incomingCall.callType} call from {displayNameForUser(incomingCall.from)}</strong>
+            <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+              <button onClick={() => void acceptIncomingCall()} type="button">Accept</button>
+              <button className="warn" onClick={declineIncomingCall} type="button">Decline</button>
             </div>
           </div>
-        </div>
-      </section>
+        ) : null}
 
-      {incomingCall ? (
-        <section className="panel" style={{ padding: "1rem", marginBottom: "0.8rem" }}>
-          <strong>
-            Incoming {incomingCall.callType} call from {displayNameForUser(incomingCall.from)}
-          </strong>
-          <div style={{ marginTop: "0.7rem", display: "flex", gap: "0.6rem" }}>
-            <button onClick={() => void acceptIncomingCall()}>Accept</button>
-            <button className="warn" onClick={declineIncomingCall}>
-              Decline
+        {outgoingCall ? (
+          <div className="messenger-call-banner">Calling {displayNameForUser(outgoingCall.peerId)}...</div>
+        ) : null}
+
+        {activeCall ? (
+          <div className="messenger-call-banner">
+            In call with {displayNameForUser(activeCall.peerId)} ({activeCall.callType})
+            <button className="warn" onClick={() => void terminateCall(true)} type="button">
+              End Call
             </button>
           </div>
-        </section>
-      ) : null}
+        ) : null}
 
-      {outgoingCall ? (
-        <section className="panel" style={{ padding: "0.8rem", marginBottom: "0.8rem" }}>
-          Calling {displayNameForUser(outgoingCall.peerId)} ({outgoingCall.callType})...
-        </section>
-      ) : null}
+        {videoRecording ? (
+          <div className="messenger-call-banner">
+            <p style={{ marginTop: 0, marginBottom: "0.4rem" }}>Recording video note...</p>
+            <video
+              ref={videoPreviewRef}
+              playsInline
+              muted
+              style={{ width: "100%", borderRadius: "12px", maxHeight: "220px", objectFit: "cover" }}
+            />
+            <button className="warn" style={{ marginTop: "0.6rem" }} onClick={stopVideoNote} type="button">
+              Stop Video
+            </button>
+          </div>
+        ) : null}
 
-      {activeCall ? (
-        <section className="panel" style={{ padding: "1rem", marginBottom: "0.8rem" }}>
-          <strong>
-            In call with {displayNameForUser(activeCall.peerId)}: {activeCall.callType}
-          </strong>
-          <p className="muted" style={{ marginBottom: "0.6rem" }}>
-            Room: {activeCall.roomName}
-          </p>
-          <button className="warn" style={{ marginTop: "0.7rem" }} onClick={() => void terminateCall(true)}>
-            End Call
-          </button>
-        </section>
-      ) : null}
-
-      {videoRecording ? (
-        <section className="panel" style={{ padding: "0.8rem", marginBottom: "0.8rem" }}>
-          <p style={{ marginTop: 0, marginBottom: "0.45rem" }}>Recording video note...</p>
-          <video
-            ref={videoPreviewRef}
-            playsInline
-            muted
-            style={{ width: "100%", borderRadius: "12px", maxHeight: "220px", objectFit: "cover" }}
-          />
-          <button className="warn" style={{ marginTop: "0.65rem" }} onClick={stopVideoNote}>
-            Stop Video Note
-          </button>
-        </section>
-      ) : null}
-
-      <section className="panel" style={{ minHeight: "48vh", maxHeight: "54vh", overflowY: "auto", padding: "1rem" }}>
-        {messages.map((message) => {
-          const own = auth?.userId === message.sender;
-          const mediaPreview = message.media ? mediaPreviews[message.media.mediaId] : null;
-          return (
-            <article
-              key={`${message.clientMessageId}-${message.serverId ?? "local"}`}
-              style={{
-                marginBottom: "0.75rem",
-                display: "flex",
-                justifyContent: own ? "flex-end" : "flex-start"
-              }}
-            >
-              <div
+        <div ref={threadRef} className="messenger-thread">
+          {messages.map((message) => {
+            const own = auth?.userId === message.sender;
+            const mediaPreview = message.media ? mediaPreviews[message.media.mediaId] : null;
+            return (
+              <article
+                key={`${message.clientMessageId}-${message.serverId ?? "local"}`}
                 style={{
-                  width: "min(85%, 460px)",
-                  borderRadius: "12px",
-                  padding: "0.65rem 0.75rem",
-                  background: own ? "rgba(38, 198, 165, 0.2)" : "rgba(255, 255, 255, 0.08)",
-                  border: "1px solid rgba(159, 195, 209, 0.2)"
+                  marginBottom: "0.75rem",
+                  display: "flex",
+                  justifyContent: own ? "flex-end" : "flex-start"
                 }}
               >
-                <small className="muted" style={{ display: "block", marginBottom: "0.35rem" }}>
-                  {displayNameForUser(message.sender)} | {formatTime(message.createdAt)} | {message.status}
-                </small>
+                <div
+                  className="chat-bubble"
+                  style={{
+                    width: "min(85%, 460px)",
+                    borderRadius: "12px",
+                    padding: "0.65rem 0.75rem",
+                    background: own ? "rgba(38, 198, 165, 0.2)" : "rgba(255, 255, 255, 0.08)",
+                    border: "1px solid rgba(159, 195, 209, 0.2)"
+                  }}
+                >
+                  <small className="muted" style={{ display: "block", marginBottom: "0.35rem" }}>
+                    {displayNameForUser(message.sender)} | {formatTime(message.createdAt)} | {message.status}
+                  </small>
 
-                {message.text ? <div style={{ whiteSpace: "pre-wrap" }}>{message.text}</div> : null}
+                  {message.text ? <div style={{ whiteSpace: "pre-wrap" }}>{message.text}</div> : null}
 
-                {message.media ? (
-                  <div>
-                    <p style={{ marginTop: "0.2rem", marginBottom: "0.5rem" }}>
-                      {message.type.toUpperCase()}: {message.media.fileName}
-                    </p>
+                  {message.media ? (
+                    <div>
+                      <p style={{ marginTop: "0.2rem", marginBottom: "0.5rem" }}>
+                        {message.type.toUpperCase()}: {message.media.fileName}
+                      </p>
 
-                    {mediaPreview && isInlineMedia(mediaPreview.mimeType) ? (
-                      <div style={{ marginBottom: "0.5rem" }}>
-                        {mediaPreview.mimeType.startsWith("audio/") ? (
-                          <audio controls src={mediaPreview.objectUrl} style={{ width: "100%" }} />
-                        ) : null}
-                        {mediaPreview.mimeType.startsWith("video/") ? (
-                          <video
-                            controls
-                            playsInline
-                            src={mediaPreview.objectUrl}
-                            style={{ width: "100%", borderRadius: "10px" }}
-                          />
-                        ) : null}
-                        {mediaPreview.mimeType.startsWith("image/") ? (
-                          <img
-                            src={mediaPreview.objectUrl}
-                            alt={message.media.fileName}
-                            style={{ width: "100%", borderRadius: "10px" }}
-                          />
-                        ) : null}
-                      </div>
-                    ) : null}
-
-                    <div style={{ display: "flex", gap: "0.45rem", flexWrap: "wrap" }}>
-                      {!mediaPreview ? (
-                        <button className="secondary" onClick={() => void openInlineMedia(message)}>
-                          Open
-                        </button>
+                      {mediaPreview && isInlineMedia(mediaPreview.mimeType) ? (
+                        <div style={{ marginBottom: "0.5rem" }}>
+                          {mediaPreview.mimeType.startsWith("audio/") ? (
+                            <audio controls src={mediaPreview.objectUrl} style={{ width: "100%" }} />
+                          ) : null}
+                          {mediaPreview.mimeType.startsWith("video/") ? (
+                            <video
+                              controls
+                              playsInline
+                              src={mediaPreview.objectUrl}
+                              style={{ width: "100%", borderRadius: "10px" }}
+                            />
+                          ) : null}
+                          {mediaPreview.mimeType.startsWith("image/") ? (
+                            <img
+                              src={mediaPreview.objectUrl}
+                              alt={message.media.fileName}
+                              style={{ width: "100%", borderRadius: "10px" }}
+                            />
+                          ) : null}
+                        </div>
                       ) : null}
-                      <button className="secondary" onClick={() => void downloadMediaMessage(message)}>
-                        Save
-                      </button>
+
+                      <div style={{ display: "flex", gap: "0.45rem", flexWrap: "wrap" }}>
+                        {!mediaPreview ? (
+                          <button className="secondary" onClick={() => void openInlineMedia(message)}>
+                            Open
+                          </button>
+                        ) : null}
+                        <button className="secondary" onClick={() => void downloadMediaMessage(message)}>
+                          Save
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                ) : null}
-              </div>
-            </article>
-          );
-        })}
+                  ) : null}
+                </div>
+              </article>
+            );
+          })}
 
-        {peerTyping && selectedPeerId ? <p className="muted">{displayNameForUser(selectedPeerId)} is typing...</p> : null}
-      </section>
+          {peerTyping && selectedPeerId ? <p className="muted">{displayNameForUser(selectedPeerId)} is typing...</p> : null}
+        </div>
 
-      <section className="panel" style={{ padding: "1rem", marginTop: "0.8rem" }}>
-        <div style={{ display: "grid", gap: "0.7rem" }}>
+        <footer className="messenger-compose">
           <textarea
             rows={3}
             placeholder={selectedPeerId ? "Type encrypted message..." : "Select a user first..."}
@@ -1352,12 +1503,18 @@ export default function ChatPage() {
             onChange={(event) => {
               onDraftChange(event.target.value);
             }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                void sendText();
+              }
+            }}
             disabled={!selectedPeerId}
           />
 
-          <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap" }}>
+          <div className="chat-compose-actions" style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap" }}>
             <button onClick={() => void sendText()} disabled={!selectedPeerId || !draft.trim()}>
-              ➤ Send
+              Send
             </button>
 
             <label style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}>
@@ -1383,7 +1540,7 @@ export default function ChatPage() {
                 }}
                 disabled={!selectedPeerId}
               >
-                📎 Upload
+                Upload
               </button>
             </label>
 
@@ -1393,7 +1550,7 @@ export default function ChatPage() {
                 onClick={() => void startAudioNote()}
                 disabled={!selectedPeerId || videoRecording}
               >
-                🎙️ Voice Note
+                Voice
               </button>
             ) : (
               <button className="warn" onClick={stopAudioNote}>
@@ -1407,46 +1564,12 @@ export default function ChatPage() {
                 onClick={() => void startVideoNote()}
                 disabled={!selectedPeerId || audioRecording}
               >
-                🎬 Video Note
+                Video Note
               </button>
             ) : null}
           </div>
-        </div>
+        </footer>
       </section>
-
-      {profileOpen ? (
-        <section className="panel" style={{ padding: "1rem", marginTop: "0.8rem" }}>
-          <h2 style={{ marginTop: 0 }}>Account</h2>
-          <label htmlFor="profile-display-name" style={{ display: "block", marginBottom: "0.35rem" }}>
-            Display Name
-          </label>
-          <input
-            id="profile-display-name"
-            value={profileDisplayName}
-            onChange={(event) => setProfileDisplayName(event.target.value)}
-            placeholder="Your display name"
-          />
-
-          <label htmlFor="profile-avatar-url" style={{ display: "block", marginTop: "0.75rem", marginBottom: "0.35rem" }}>
-            Avatar URL
-          </label>
-          <input
-            id="profile-avatar-url"
-            value={profileAvatarUrl}
-            onChange={(event) => setProfileAvatarUrl(event.target.value)}
-            placeholder="https://example.com/avatar.jpg"
-          />
-
-          <div style={{ marginTop: "0.85rem", display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
-            <button onClick={() => void saveProfile()} disabled={profileSaving}>
-              Save Profile
-            </button>
-            <button className="secondary" onClick={() => setProfileOpen(false)} disabled={profileSaving}>
-              Close
-            </button>
-          </div>
-        </section>
-      ) : null}
     </main>
   );
 }

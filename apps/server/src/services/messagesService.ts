@@ -32,18 +32,26 @@ export class MessagesService {
     return parseMessageRecord(record);
   }
 
-  async getMessagesForUser(userId: UserId, afterId: number): Promise<MessageRecord[]> {
+  async getMessagesForUser(userId: UserId, afterId: number, peerId?: UserId): Promise<MessageRecord[]> {
     const { messages } = await getCollections();
+    const query =
+      peerId && peerId !== userId
+        ? {
+            id: { $gt: afterId },
+            $or: [
+              { sender: userId, recipient: peerId },
+              { sender: peerId, recipient: userId }
+            ]
+          }
+        : {
+            id: { $gt: afterId },
+            $or: [{ sender: userId }, { recipient: userId }]
+          };
+
     const docs = await messages
-      .find(
-        {
-          id: { $gt: afterId },
-          $or: [{ sender: userId }, { recipient: userId }]
-        },
-        {
-          sort: { id: 1 }
-        }
-      )
+      .find(query, {
+        sort: { id: 1 }
+      })
       .toArray();
 
     return docs.map((doc) => parseMessageRecord(doc));

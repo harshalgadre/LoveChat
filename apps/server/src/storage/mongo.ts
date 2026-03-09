@@ -66,6 +66,8 @@ export async function ensureMongoReady(): Promise<void> {
     ),
     messages.createIndex({ id: 1 }, { unique: true }),
     messages.createIndex({ sender: 1, recipient: 1, id: 1 }),
+    messages.createIndex({ sender: 1, id: 1 }),
+    messages.createIndex({ recipient: 1, id: 1 }),
     media.createIndex({ id: 1 }, { unique: true }),
     media.createIndex({ expiresAt: 1 }),
     mediaBlobs.createIndex({ expiresAt: 1 })

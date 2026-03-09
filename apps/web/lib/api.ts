@@ -8,9 +8,11 @@ interface JsonRequestOptions {
 
 export async function jsonRequest<T>(path: string, options: JsonRequestOptions = {}): Promise<T> {
   const sessionToken = getSessionToken();
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json"
-  };
+  const headers: Record<string, string> = {};
+  const hasBody = options.body !== undefined;
+  if (hasBody) {
+    headers["Content-Type"] = "application/json";
+  }
   if (sessionToken) {
     headers.Authorization = `Bearer ${sessionToken}`;
   }
@@ -19,7 +21,7 @@ export async function jsonRequest<T>(path: string, options: JsonRequestOptions =
     method: options.method ?? "GET",
     credentials: "include",
     headers,
-    body: options.body ? JSON.stringify(options.body) : undefined,
+    body: hasBody ? JSON.stringify(options.body) : undefined,
     cache: "no-store"
   });
 
